@@ -1,0 +1,31 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# SwiftPM
+.build/
+.swiftpm/
+
+# Xcode
+DerivedData/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+*.xcuserdata/
+xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Swift/Xcode build products
+*.dSYM/
+*.dSYM.zip
+*.dSYM.tar
+
+# Local artifacts
+*.db
+*.sqlite
+*.sqlite3
+exports/
+journals/
+tmp-test/
