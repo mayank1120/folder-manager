@@ -11,6 +11,7 @@ struct PreviewView: View {
         case needsReview = "Needs Review"
         case excluded = "Excluded"
         case tree = "Tree View"
+        case extensions = "Extensions"
     }
     
     var body: some View {
@@ -54,6 +55,8 @@ struct PreviewView: View {
                     operations: filteredOperations,
                     destinationRoot: viewModel.project.destinationRoot?.path ?? ""
                 )
+            case .extensions:
+                ExtensionReportView(rows: viewModel.extensionReport)
             }
         }
     }
@@ -488,6 +491,71 @@ struct OperationTypeBadge: View {
             .background(type == .copyItem ? Color.blue.opacity(0.2) : Color.orange.opacity(0.2))
             .foregroundStyle(type == .copyItem ? .blue : .orange)
             .cornerRadius(4)
+    }
+}
+
+// MARK: - Extension Report
+
+struct ExtensionReportView: View {
+    let rows: [PlanStore.ExtensionReportRow]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if rows.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "doc.text.magnifyingglass")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.secondary)
+                    Text("No extension data available")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                HStack {
+                    Text("Extension")
+                        .frame(minWidth: 120, alignment: .leading)
+                    Spacer()
+                    Text("Count")
+                        .frame(width: 80, alignment: .trailing)
+                    Text("Total Size")
+                        .frame(width: 120, alignment: .trailing)
+                }
+                .font(.caption.bold())
+                .foregroundStyle(.secondary)
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                .background(Color.secondary.opacity(0.1))
+
+                Divider()
+
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                            HStack {
+                                Text(row.fileExtension)
+                                    .frame(minWidth: 120, alignment: .leading)
+                                Spacer()
+                                Text("\(row.count)")
+                                    .frame(width: 80, alignment: .trailing)
+                                Text(formatBytes(row.totalBytes))
+                                    .frame(width: 120, alignment: .trailing)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal)
+                            .padding(.vertical, 6)
+                            .background(index % 2 == 0 ? Color.clear : Color.secondary.opacity(0.05))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func formatBytes(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
     }
 }
 

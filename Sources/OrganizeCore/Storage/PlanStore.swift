@@ -223,6 +223,12 @@ public struct PlanStore: Sendable {
         public let relativePath: String
         public let isPackage: Bool
     }
+
+    public struct ExtensionReportRow: Sendable, Hashable {
+        public let fileExtension: String
+        public let count: Int
+        public let totalBytes: Int64
+    }
     
     /// Fetch plan items with their file paths for a given disposition
     public func fetchPlanItemRows(planId: EntityID, disposition: Disposition) async throws -> [PlanItemRow] {
@@ -274,6 +280,37 @@ public struct PlanStore: Sendable {
                     relativePath: relativePath,
                     isPackage: (row["is_package"] as Int? ?? 0) == 1
                 )
+            }
+        }
+    }
+
+    public func fetchExtensionReport(scanId: EntityID) async throws -> [ExtensionReportRow] {
+        try await dbManager.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT
+                      LOWER(CASE
+                        WHEN extension IS NULL OR extension = '' THEN '(none)'
+                        ELSE extension
+                      END) AS ext,
+                      COUNT(*) AS item_count,
+                      SUM(size_bytes) AS total_bytes
+                    FROM inventory_items
+                    WHERE scan_id = ?
+                    GROUP BY ext
+                    ORDER BY total_bytes DESC, item_count DESC, ext ASC
+                    """,
+                arguments: [scanId.uuidString]
+            )
+
+            return rows.compactMap { row -> ExtensionReportRow? in
+                guard let ext = row["ext"] as String?,
+                      let count = row["item_count"] as Int?,
+                      let totalBytes = row["total_bytes"] as Int64? else {
+                    return nil
+                }
+                return ExtensionReportRow(fileExtension: ext, count: count, totalBytes: totalBytes)
             }
         }
     }

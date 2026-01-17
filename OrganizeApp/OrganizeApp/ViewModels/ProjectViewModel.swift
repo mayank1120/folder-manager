@@ -21,6 +21,7 @@ final class ProjectViewModel {
     var operations: [PlanStore.PlanOperationExecutionRow] = []
     var needsReviewItems: [PlanStore.PlanItemRow] = []
     var excludedItems: [PlanStore.PlanItemRow] = []
+    var extensionReport: [PlanStore.ExtensionReportRow] = []
     
     // Apply state
     var applyProgress: ApplyProgress?
@@ -98,6 +99,7 @@ final class ProjectViewModel {
                     needsReviewCount: 0,   // Will be populated from items
                     excludedByPolicyCount: 0       // Will be populated from items
                 )
+                extensionReport = try await planStore.fetchExtensionReport(scanId: plan.scanId)
             }
             
             // Load operations
@@ -143,6 +145,10 @@ final class ProjectViewModel {
     
     func removePerson(_ id: UUID) async throws {
         project.people.removeAll { $0.id == id }
+        try await appState.updateProject(project)
+    }
+
+    func persistProject() async throws {
         try await appState.updateProject(project)
     }
     
@@ -233,6 +239,7 @@ final class ProjectViewModel {
             // Load NeedsReview and Excluded items
             needsReviewItems = try await planStore.fetchPlanItemRows(planId: summary.plan.id, disposition: .needsReview)
             excludedItems = try await planStore.fetchPlanItemRows(planId: summary.plan.id, disposition: .excludedByPolicy)
+            extensionReport = try await planStore.fetchExtensionReport(scanId: summary.plan.scanId)
             
             currentPhase = .preview
         } catch {
