@@ -62,6 +62,51 @@ final class ExecutionEngineTests: XCTestCase {
         XCTAssertEqual(verifyResult.failedCount, 0)
     }
 
+    func testApplyMoveCleansEmptyFolders() async throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let src = tempDir.appendingPathComponent("src")
+        let nested = src.appendingPathComponent("nested")
+        let dest = tempDir.appendingPathComponent("dest")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+
+        try writeFile(nested.appendingPathComponent("Mayank-document.pdf"), contents: "hello")
+
+        var project = Project(
+            name: "Test",
+            sourceRoots: [SourceRoot(path: src.path)],
+            destinationRoot: DestinationRoot(path: dest.path),
+            people: [Person(displayName: "Mayank", keywordTokens: ["Mayank"])]
+        )
+        project.settings.executionMode = .move
+        project.settings.cleanupEmptyFolders = true
+
+        let dbURL = tempDir.appendingPathComponent("organize.db")
+        let dbManager = try DatabaseManager(path: dbURL.path)
+        let inventoryStore = InventoryStore(dbManager: dbManager)
+        let planStore = PlanStore(dbManager: dbManager)
+
+        let scanner = Scanner(inventoryStore: inventoryStore)
+        let scanResult = try await scanner.scan(project: project)
+        project.currentScanId = scanResult.scan.id
+
+        let planner = Planner(inventoryStore: inventoryStore, planStore: planStore)
+        let summary = try await planner.createPlan(project: project, scanId: scanResult.scan.id)
+        XCTAssertEqual(summary.moveEligibleCount, 1)
+
+        let applyEngine = ApplyEngine(dbManager: dbManager)
+        let applyResult = try await applyEngine.apply(
+            planId: summary.plan.id,
+            project: project,
+            projectDirectory: tempDir
+        )
+        XCTAssertEqual(applyResult.completedCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: nested.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: src.path))
+    }
+
     func testApplyTimeCollisionResultsInSkipAndVerifyFails() async throws {
         let tempDir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: tempDir) }

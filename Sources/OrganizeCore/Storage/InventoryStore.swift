@@ -144,8 +144,8 @@ public struct InventoryStore: Sendable {
                     INSERT OR REPLACE INTO inventory_items 
                     (item_id, scan_id, source_root_id, relative_path, is_package, is_symlink, is_alias,
                      size_bytes, modified_time, created_time, exif_datetime_original, is_cloud_only,
-                     uttype_identifier, extension)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     content_hash, uttype_identifier, extension)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                 arguments: [
                     item.id,
@@ -160,6 +160,7 @@ public struct InventoryStore: Sendable {
                     item.createdTime.map { Int64($0.timeIntervalSince1970) },
                     item.exifDateTimeOriginal.map { Int64($0.timeIntervalSince1970) },
                     item.isCloudOnly ? 1 : 0,
+                    item.contentHash,
                     item.uttypeIdentifier,
                     item.extension
                 ]
@@ -174,8 +175,8 @@ public struct InventoryStore: Sendable {
                     INSERT OR REPLACE INTO inventory_items
                     (item_id, scan_id, source_root_id, relative_path, is_package, is_symlink, is_alias,
                      size_bytes, modified_time, created_time, exif_datetime_original, is_cloud_only,
-                     uttype_identifier, extension)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     content_hash, uttype_identifier, extension)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """
             )
 
@@ -193,6 +194,7 @@ public struct InventoryStore: Sendable {
                     item.createdTime.map { Int64($0.timeIntervalSince1970) },
                     item.exifDateTimeOriginal.map { Int64($0.timeIntervalSince1970) },
                     item.isCloudOnly ? 1 : 0,
+                    item.contentHash,
                     item.uttypeIdentifier,
                     item.extension
                 ])
@@ -233,6 +235,7 @@ public struct InventoryStore: Sendable {
                     createdTime: createdTime,
                     exifDateTimeOriginal: exifDateTime,
                     isCloudOnly: (row["is_cloud_only"] as Int? ?? 0) == 1,
+                    contentHash: row["content_hash"],
                     uttypeIdentifier: row["uttype_identifier"],
                     extension: row["extension"]
                 )

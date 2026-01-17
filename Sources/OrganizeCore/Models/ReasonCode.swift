@@ -19,8 +19,10 @@ public enum PlanReasonCode: String, Codable, Sendable {
     case policyExcludeVideo = "PolicyExclude:Video"
     case policyExcludeUnknownType = "PolicyExclude:UnknownType"
     case policyExcludeUserExtension = "PolicyExclude:UserExtension"
+    case policyExcludeDuplicate = "PolicyExclude:Duplicate"
 
     case needsReviewUnmappedType = "NeedsReview:UnmappedType"
+    case needsReviewBelowMinSize = "NeedsReview:BelowMinSize"
 }
 
 public enum NeedsReviewIssueType: String, Codable, Sendable {
@@ -28,6 +30,7 @@ public enum NeedsReviewIssueType: String, Codable, Sendable {
     case collision = "Collision"
     case cloudOnly = "CloudOnly"
     case unmappedType = "UnmappedType"
+    case sizeFilter = "SizeFilter"
 }
 
 public enum ApplyReasonCode: String, Codable, Sendable {

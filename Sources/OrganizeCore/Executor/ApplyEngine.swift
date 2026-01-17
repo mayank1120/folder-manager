@@ -8,6 +8,7 @@ public struct ApplyResult: Sendable {
     public let skippedCount: Int
     public let failedCount: Int
     public let dryRun: Bool
+    public let emptyFoldersRemoved: Int
 
     public init(
         planId: EntityID,
@@ -15,7 +16,8 @@ public struct ApplyResult: Sendable {
         completedCount: Int,
         skippedCount: Int,
         failedCount: Int,
-        dryRun: Bool
+        dryRun: Bool,
+        emptyFoldersRemoved: Int = 0
     ) {
         self.planId = planId
         self.totalOperations = totalOperations
@@ -23,6 +25,7 @@ public struct ApplyResult: Sendable {
         self.skippedCount = skippedCount
         self.failedCount = failedCount
         self.dryRun = dryRun
+        self.emptyFoldersRemoved = emptyFoldersRemoved
     }
 }
 
@@ -348,13 +351,21 @@ public struct ApplyEngine: Sendable {
             }
         }
 
+        let emptyFoldersRemoved: Int
+        if project.settings.cleanupEmptyFolders && project.settings.executionMode == .move {
+            emptyFoldersRemoved = cleanupEmptyFolders(sourceRoots: project.sourceRoots)
+        } else {
+            emptyFoldersRemoved = 0
+        }
+
         return ApplyResult(
             planId: planId,
             totalOperations: total,
             completedCount: completed,
             skippedCount: skipped,
             failedCount: failed,
-            dryRun: dryRun
+            dryRun: dryRun,
+            emptyFoldersRemoved: emptyFoldersRemoved
         )
     }
 
@@ -393,7 +404,8 @@ public struct ApplyEngine: Sendable {
             completedCount: completed,
             skippedCount: skipped,
             failedCount: failed,
-            dryRun: true
+            dryRun: true,
+            emptyFoldersRemoved: 0
         )
     }
 
@@ -696,6 +708,58 @@ public struct ApplyEngine: Sendable {
                 copyStatAtTime: sourceStat
             )
         )
+    }
+
+    private func cleanupEmptyFolders(sourceRoots: [SourceRoot]) -> Int {
+        var removedCount = 0
+        let fileManager = FileManager.default
+
+        for root in sourceRoots where root.isValid {
+            let rootURL = URL(fileURLWithPath: root.path).standardizedFileURL
+            var isDir: ObjCBool = false
+            guard fileManager.fileExists(atPath: rootURL.path, isDirectory: &isDir), isDir.boolValue else {
+                continue
+            }
+
+            var directories: [URL] = []
+            if let enumerator = fileManager.enumerator(
+                at: rootURL,
+                includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey, .isPackageKey],
+                options: []
+            ) {
+                for case let url as URL in enumerator {
+                    guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .isPackageKey]) else {
+                        continue
+                    }
+                    if values.isSymbolicLink == true {
+                        enumerator.skipDescendants()
+                        continue
+                    }
+                    if values.isPackage == true {
+                        enumerator.skipDescendants()
+                        continue
+                    }
+                    if values.isDirectory == true {
+                        directories.append(url)
+                    }
+                }
+            }
+
+            directories.sort { $0.path.count > $1.path.count }
+            for dir in directories where dir.path != rootURL.path {
+                do {
+                    let contents = try fileManager.contentsOfDirectory(atPath: dir.path)
+                    if contents.isEmpty {
+                        try fileManager.removeItem(at: dir)
+                        removedCount += 1
+                    }
+                } catch {
+                    continue
+                }
+            }
+        }
+
+        return removedCount
     }
 
     private func sourcePathForExecution(row: PlanStore.PlanOperationExecutionRow, project: Project) -> String {

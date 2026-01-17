@@ -79,7 +79,8 @@ public actor Scanner {
             for await event in Self.scanEvents(
                 sourceRoot: sourceRoot,
                 scanId: scanId,
-                projectMarkers: project.settings.projectMarkers
+                projectMarkers: project.settings.projectMarkers,
+                duplicateDetection: project.settings.duplicateDetection
             ) {
                 switch event {
                 case .item(let scannedItem):
@@ -136,7 +137,8 @@ public actor Scanner {
     private static func scanEvents(
         sourceRoot: SourceRoot,
         scanId: EntityID,
-        projectMarkers: [String]
+        projectMarkers: [String],
+        duplicateDetection: DuplicateDetectionSettings
     ) -> AsyncStream<ScanEvent> {
         AsyncStream { continuation in
             let queue = DispatchQueue(label: "organize.scanner.enumeration")
@@ -149,6 +151,7 @@ public actor Scanner {
                 let aliasDetector = AliasDetector()
                 let projectMarkerDetector = ProjectMarkerDetector(markers: projectMarkers)
                 let exifReader = EXIFReader()
+                let shouldHash = duplicateDetection.enabled
 
                 let sourceURL = URL(fileURLWithPath: sourceRoot.path).standardizedFileURL
 
@@ -286,6 +289,7 @@ public actor Scanner {
                             modifiedTime: resourceValues.contentModificationDate ?? Date(),
                             createdTime: resourceValues.creationDate,
                             isCloudOnly: cloudStatusDetector.isCloudOnly(at: fileURL),
+                            contentHash: nil,
                             uttypeIdentifier: typeDetector.detectType(at: fileURL),
                             extension: typeDetector.getExtension(at: fileURL)
                         )
@@ -328,6 +332,13 @@ public actor Scanner {
                         exifDate = nil
                     }
 
+                    let contentHash: String?
+                    if shouldHash && !isCloudOnly {
+                        contentHash = computeContentHash(for: fileURL)
+                    } else {
+                        contentHash = nil
+                    }
+
                     let item = InventoryItem(
                         id: itemId,
                         scanId: scanId,
@@ -339,6 +350,7 @@ public actor Scanner {
                         createdTime: resourceValues.creationDate,
                         exifDateTimeOriginal: exifDate,
                         isCloudOnly: isCloudOnly,
+                        contentHash: contentHash,
                         uttypeIdentifier: uttypeIdentifier,
                         extension: fileExtension
                     )
@@ -371,5 +383,24 @@ public actor Scanner {
         let input = "\(scanId.uuidString)|\(sourceRootId.uuidString)|\(relativePath)"
         let hash = SHA256.hash(data: Data(input.utf8))
         return hash.prefix(16).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func computeContentHash(for url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return nil
+        }
+        defer { try? handle.close() }
+
+        var hasher = SHA256()
+        while true {
+            let data = try? handle.read(upToCount: 1_048_576)
+            guard let chunk = data, !chunk.isEmpty else {
+                break
+            }
+            hasher.update(data: chunk)
+        }
+
+        let digest = hasher.finalize()
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 }

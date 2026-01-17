@@ -63,6 +63,7 @@ public actor DatabaseManager {
                 t.column("created_time", .integer)
                 t.column("exif_datetime_original", .integer)
                 t.column("is_cloud_only", .integer).notNull().defaults(to: 0)
+                t.column("content_hash", .text)
                 t.column("uttype_identifier", .text)
                 t.column("extension", .text)
                 t.foreignKey(["scan_id"], references: "scans", columns: ["scan_id"])
@@ -154,6 +155,7 @@ public actor DatabaseManager {
             // Migrate execution_journal if columns are missing
             try Self.ensureExecutionJournalColumns(db: db)
             try Self.ensurePlanItemsColumns(db: db)
+            try Self.ensureInventoryItemColumns(db: db)
             
             // Indexes
             try db.create(index: "idx_inventory_scan", on: "inventory_items", columns: ["scan_id"], ifNotExists: true)
@@ -255,6 +257,15 @@ public actor DatabaseManager {
         }
         if !existingColumns.contains("classification_source") {
             try db.execute(sql: "ALTER TABLE plan_items ADD COLUMN classification_source TEXT")
+        }
+    }
+
+    private static func ensureInventoryItemColumns(db: Database) throws {
+        let rows = try Row.fetchAll(db, sql: "PRAGMA table_info(inventory_items)")
+        let existingColumns = Set(rows.compactMap { $0["name"] as String? })
+
+        if !existingColumns.contains("content_hash") {
+            try db.execute(sql: "ALTER TABLE inventory_items ADD COLUMN content_hash TEXT")
         }
     }
     

@@ -66,6 +66,10 @@ public struct ProjectSettings: Codable, Sendable, Hashable {
     public var extensionRules: [ExtensionRule]
     public var extensionExclusions: ExtensionExclusions
     public var ownerMatching: OwnerMatchingSettings
+    public var duplicateDetection: DuplicateDetectionSettings
+    public var largeFileFilter: LargeFileFilterSettings
+    public var pdfDateGrouping: PDFDateGrouping
+    public var cleanupEmptyFolders: Bool
     
     public init(
         autoFileUnassigned: Bool = false,
@@ -82,7 +86,11 @@ public struct ProjectSettings: Codable, Sendable, Hashable {
         projectMarkers: [String] = [".git", ".svn", ".hg", "package.json", "Cargo.toml", "go.mod", "pyproject.toml", "requirements.txt", "Pipfile", "Podfile"],
         extensionRules: [ExtensionRule] = [],
         extensionExclusions: ExtensionExclusions = ExtensionExclusions(),
-        ownerMatching: OwnerMatchingSettings = OwnerMatchingSettings()
+        ownerMatching: OwnerMatchingSettings = OwnerMatchingSettings(),
+        duplicateDetection: DuplicateDetectionSettings = DuplicateDetectionSettings(),
+        largeFileFilter: LargeFileFilterSettings = LargeFileFilterSettings(),
+        pdfDateGrouping: PDFDateGrouping = .year,
+        cleanupEmptyFolders: Bool = false
     ) {
         self.autoFileUnassigned = autoFileUnassigned
         self.autoFileShared = autoFileShared
@@ -99,6 +107,10 @@ public struct ProjectSettings: Codable, Sendable, Hashable {
         self.extensionRules = extensionRules
         self.extensionExclusions = extensionExclusions
         self.ownerMatching = ownerMatching
+        self.duplicateDetection = duplicateDetection
+        self.largeFileFilter = largeFileFilter
+        self.pdfDateGrouping = pdfDateGrouping
+        self.cleanupEmptyFolders = cleanupEmptyFolders
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -117,6 +129,10 @@ public struct ProjectSettings: Codable, Sendable, Hashable {
         case extensionRules
         case extensionExclusions
         case ownerMatching
+        case duplicateDetection
+        case largeFileFilter
+        case pdfDateGrouping
+        case cleanupEmptyFolders
     }
 
     public init(from decoder: Decoder) throws {
@@ -140,6 +156,14 @@ public struct ProjectSettings: Codable, Sendable, Hashable {
             ?? ExtensionExclusions()
         self.ownerMatching = try container.decodeIfPresent(OwnerMatchingSettings.self, forKey: .ownerMatching)
             ?? OwnerMatchingSettings()
+        self.duplicateDetection = try container.decodeIfPresent(DuplicateDetectionSettings.self, forKey: .duplicateDetection)
+            ?? DuplicateDetectionSettings()
+        self.largeFileFilter = try container.decodeIfPresent(LargeFileFilterSettings.self, forKey: .largeFileFilter)
+            ?? LargeFileFilterSettings()
+        self.pdfDateGrouping = try container.decodeIfPresent(PDFDateGrouping.self, forKey: .pdfDateGrouping)
+            ?? .year
+        self.cleanupEmptyFolders = try container.decodeIfPresent(Bool.self, forKey: .cleanupEmptyFolders)
+            ?? false
     }
 }
 

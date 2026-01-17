@@ -8,6 +8,7 @@ public struct PlanExportPaths: Sendable {
     public let proposedMovesCSV: URL
     public let needsReviewCSV: URL
     public let excludedByPolicyCSV: URL
+    public let extensionReportCSV: URL
 
     public init(directory: URL) {
         self.directory = directory
@@ -15,6 +16,7 @@ public struct PlanExportPaths: Sendable {
         self.proposedMovesCSV = directory.appendingPathComponent("proposed_moves.csv")
         self.needsReviewCSV = directory.appendingPathComponent("needs_review.csv")
         self.excludedByPolicyCSV = directory.appendingPathComponent("excluded_by_policy.csv")
+        self.extensionReportCSV = directory.appendingPathComponent("extension_report.csv")
     }
 }
 
@@ -78,6 +80,13 @@ public struct ExportManager: Sendable {
                 "itemId", "path", "reason", "policyType"
             ],
             rows: excludedRows.map { $0.csvRow }
+        )
+
+        let extensionRows = try await fetchExtensionReportRows(scanId: plan.scanId)
+        try writeCSV(
+            url: paths.extensionReportCSV,
+            header: ["extension", "count", "totalBytes"],
+            rows: extensionRows.map { $0.csvRow }
         )
 
         return paths
@@ -522,6 +531,53 @@ public struct ExportManager: Sendable {
                     policyType: policyType,
                     sortKey: "\(sourceRootId)|\(relativePath)|\(reason)"
                 )
+            }
+        }
+    }
+
+    // MARK: - Extension Report
+
+    private struct ExtensionReportRow: Sendable {
+        let fileExtension: String
+        let count: Int
+        let totalBytes: Int64
+
+        var csvRow: [String?] {
+            [
+                fileExtension,
+                String(count),
+                String(totalBytes)
+            ]
+        }
+    }
+
+    private func fetchExtensionReportRows(scanId: EntityID) async throws -> [ExtensionReportRow] {
+        try await dbManager.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT
+                      LOWER(CASE
+                        WHEN extension IS NULL OR extension = '' THEN '(none)'
+                        ELSE extension
+                      END) AS ext,
+                      COUNT(*) AS item_count,
+                      SUM(size_bytes) AS total_bytes
+                    FROM inventory_items
+                    WHERE scan_id = ?
+                    GROUP BY ext
+                    ORDER BY total_bytes DESC, item_count DESC, ext ASC
+                    """,
+                arguments: [scanId.uuidString]
+            )
+
+            return rows.compactMap { row -> ExtensionReportRow? in
+                guard let ext = row["ext"] as String?,
+                      let count = row["item_count"] as Int?,
+                      let totalBytes = row["total_bytes"] as Int64? else {
+                    return nil
+                }
+                return ExtensionReportRow(fileExtension: ext, count: count, totalBytes: totalBytes)
             }
         }
     }

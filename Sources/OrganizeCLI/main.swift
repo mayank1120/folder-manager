@@ -205,6 +205,7 @@ struct PlanCommand: AsyncParsableCommand {
         print("    \(paths.proposedMovesCSV.path)")
         print("    \(paths.needsReviewCSV.path)")
         print("    \(paths.excludedByPolicyCSV.path)")
+        print("    \(paths.extensionReportCSV.path)")
     }
 }
 

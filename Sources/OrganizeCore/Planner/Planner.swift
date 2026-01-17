@@ -40,6 +40,9 @@ public struct Planner: Sendable {
         let typeClassifier = TypeClassifier(settings: project.settings)
         let dispositionEngine = DispositionEngine()
         let extensionExclusions = project.settings.extensionExclusions
+        let duplicateSettings = project.settings.duplicateDetection
+        let largeFileFilter = project.settings.largeFileFilter
+        let pdfDateGrouping = project.settings.pdfDateGrouping
         let excludedExtensionSet = Set(ExtensionRule.normalizeExtensions(extensionExclusions.excludedExtensions))
 
         let orderedExtensionRules = project.settings.extensionRules
@@ -135,6 +138,7 @@ public struct Planner: Sendable {
                             destinationRoot: destRootURL,
                             ownerBucketFolder: owner.bucketName,
                             classification: cls,
+                            pdfDateGrouping: pdfDateGrouping,
                             item: item
                         )
                     }
@@ -152,6 +156,7 @@ public struct Planner: Sendable {
                         destinationRoot: destRootURL,
                         ownerBucketFolder: owner.bucketName,
                         classification: cls,
+                        pdfDateGrouping: pdfDateGrouping,
                         item: item
                     )
                 }
@@ -189,10 +194,6 @@ public struct Planner: Sendable {
                 disposition = .moveEligible
             }
 
-            if disposition == .moveEligible, matchedRuleId != nil, reasonCode == nil {
-                reasonCode = PlanReasonCode.categoryByExtension.rawValue
-            }
-
             working.append(
                 WorkingItem(
                     item: item,
@@ -210,6 +211,63 @@ public struct Planner: Sendable {
                     classificationSource: classificationSource
                 )
             )
+        }
+
+        if largeFileFilter.enabled {
+            for idx in working.indices {
+                let item = working[idx].item
+                if working[idx].disposition == .moveEligible,
+                   item.sizeBytes < largeFileFilter.minimumBytes {
+                    working[idx].disposition = .needsReview
+                    working[idx].reasonCode = PlanReasonCode.needsReviewBelowMinSize.rawValue
+                    working[idx].issueType = NeedsReviewIssueType.sizeFilter.rawValue
+                }
+            }
+        }
+
+        if duplicateSettings.enabled {
+            var groups: [String: [Int]] = [:]
+            groups.reserveCapacity(working.count)
+
+            for (idx, w) in working.enumerated() {
+                guard w.disposition == .moveEligible,
+                      let hash = w.item.contentHash,
+                      !hash.isEmpty else {
+                    continue
+                }
+                let key = "\(hash)|\(w.item.sizeBytes)|\(w.owner.bucketName)"
+                groups[key, default: []].append(idx)
+            }
+
+            for (_, indices) in groups where indices.count > 1 {
+                let sortedIndices: [Int] = indices.sorted { lhs, rhs in
+                    let left = working[lhs]
+                    let right = working[rhs]
+
+                    if duplicateSettings.handling == .keepNewest {
+                        if left.item.modifiedTime != right.item.modifiedTime {
+                            return left.item.modifiedTime > right.item.modifiedTime
+                        }
+                    }
+
+                    return left.item.relativePath.localizedCaseInsensitiveCompare(right.item.relativePath) == .orderedAscending
+                }
+
+                guard let keepIndex = sortedIndices.first else { continue }
+                for idx in sortedIndices where idx != keepIndex {
+                    working[idx].disposition = .excludedByPolicy
+                    working[idx].reasonCode = PlanReasonCode.policyExcludeDuplicate.rawValue
+                    working[idx].issueType = nil
+                }
+            }
+        }
+
+        for idx in working.indices {
+            if working[idx].disposition == .moveEligible,
+               working[idx].matchedRuleId != nil,
+               working[idx].reasonCode == nil {
+                working[idx].reasonCode = PlanReasonCode.categoryByExtension.rawValue
+            }
         }
 
         // Collisions: only for move-eligible items with a baseDestPath.
@@ -488,6 +546,7 @@ public struct Planner: Sendable {
         destinationRoot: URL,
         ownerBucketFolder: String,
         classification: TypeClassification,
+        pdfDateGrouping: PDFDateGrouping,
         item: InventoryItem
     ) -> String {
         let routingDate = item.routingDate
@@ -505,6 +564,9 @@ public struct Planner: Sendable {
                 .appendingPathComponent("PDF")
                 .appendingPathComponent(topic)
                 .appendingPathComponent(year)
+            if pdfDateGrouping == .yearMonth {
+                dir = dir.appendingPathComponent(month)
+            }
         case .docs:
             dir = dir
                 .appendingPathComponent("Docs")

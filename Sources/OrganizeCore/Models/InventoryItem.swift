@@ -15,6 +15,7 @@ public struct InventoryItem: Codable, Identifiable, Sendable, Hashable {
     public let createdTime: Date?
     public let exifDateTimeOriginal: Date?
     public let isCloudOnly: Bool
+    public let contentHash: String?
     
     public let uttypeIdentifier: String?
     public let `extension`: String?
@@ -32,6 +33,7 @@ public struct InventoryItem: Codable, Identifiable, Sendable, Hashable {
         createdTime: Date? = nil,
         exifDateTimeOriginal: Date? = nil,
         isCloudOnly: Bool = false,
+        contentHash: String? = nil,
         uttypeIdentifier: String? = nil,
         extension: String? = nil
     ) {
@@ -47,6 +49,7 @@ public struct InventoryItem: Codable, Identifiable, Sendable, Hashable {
         self.createdTime = createdTime
         self.exifDateTimeOriginal = exifDateTimeOriginal
         self.isCloudOnly = isCloudOnly
+        self.contentHash = contentHash
         self.uttypeIdentifier = uttypeIdentifier
         self.extension = `extension`
     }
