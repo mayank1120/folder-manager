@@ -112,6 +112,8 @@ public struct ApplyEngine: Sendable {
         let journalReader = JournalReader()
         let copyStatsByOperationId = (try? journalReader.copyStatsByOperationId(from: journalURL)) ?? [:]
         let journalWriter = try JournalWriter(planId: planId, journalFileURL: journalURL, journalStore: journalStore)
+        let normalizedTagNames = normalizeTagNames(project.settings.tagNames)
+        let shouldApplyTags = project.settings.tagsEnabled && !normalizedTagNames.isEmpty
 
         var stateByOperationId: [String: JournalState] = [:]
         let existingStates = try await journalStore.fetchAllStates(planId: planId)
@@ -123,10 +125,12 @@ public struct ApplyEngine: Sendable {
 
         for (index, row) in rows.enumerated() {
             let operation = row.operation
-            let sourceURL = URL(fileURLWithPath: sourcePathForExecution(row: row, project: project))
+            let sourcePath = sourcePathForExecution(row: row, project: project)
+            let sourceURL = URL(fileURLWithPath: sourcePath)
             let destURL = URL(fileURLWithPath: operation.resolvedDestPath)
+            let progressPath = operation.operationType == .applyTags ? destURL.path : sourceURL.path
 
-            progressHandler?(index + 1, total, sourceURL.path)
+            progressHandler?(index + 1, total, progressPath)
 
             if let existing = stateByOperationId[operation.operationId] {
                 switch existing.currentState {
@@ -145,7 +149,9 @@ public struct ApplyEngine: Sendable {
             }
 
             do {
-                if let existing = stateByOperationId[operation.operationId], existing.currentState == .started {
+                if let existing = stateByOperationId[operation.operationId],
+                   existing.currentState == .started,
+                   operation.operationType != .applyTags {
                     let resumed = try await resumeStartedOperation(
                         row: row,
                         sourceURL: sourceURL,
@@ -168,6 +174,105 @@ public struct ApplyEngine: Sendable {
                         continue
                     }
                     // resumed == .planned => fall through and retry as a fresh operation
+                }
+
+                if operation.operationType == .applyTags {
+                    guard shouldApplyTags else {
+                        try await journalWriter.append(
+                            JournalEntry(
+                                planId: planId,
+                                operationId: operation.operationId,
+                                state: .skipped,
+                                operationType: .applyTags,
+                                itemId: operation.itemId,
+                                resolvedDestPath: operation.resolvedDestPath,
+                                error: "Tags disabled or no tag names configured",
+                                reasonCode: ApplyReasonCode.accessError.rawValue
+                            )
+                        )
+                        skipped += 1
+                        continue
+                    }
+
+                    guard FileManager.default.fileExists(atPath: destURL.path) else {
+                        try await journalWriter.append(
+                            JournalEntry(
+                                planId: planId,
+                                operationId: operation.operationId,
+                                state: .skipped,
+                                operationType: .applyTags,
+                                itemId: operation.itemId,
+                                resolvedDestPath: operation.resolvedDestPath,
+                                error: "Destination missing for tag apply: \(destURL.path)",
+                                reasonCode: ApplyReasonCode.accessError.rawValue
+                            )
+                        )
+                        skipped += 1
+                        continue
+                    }
+
+                    let tagsBefore = readTags(from: destURL)
+                    let tagsAfter = mergeTags(existing: tagsBefore, additional: normalizedTagNames)
+
+                    try await journalWriter.append(
+                        JournalEntry(
+                            planId: planId,
+                            operationId: operation.operationId,
+                            state: .planned,
+                            operationType: .applyTags,
+                            itemId: operation.itemId,
+                            resolvedDestPath: operation.resolvedDestPath
+                        )
+                    )
+
+                    try await journalWriter.append(
+                        JournalEntry(
+                            planId: planId,
+                            operationId: operation.operationId,
+                            state: .started,
+                            operationType: .applyTags,
+                            itemId: operation.itemId,
+                            resolvedDestPath: operation.resolvedDestPath,
+                            tagsBefore: tagsBefore,
+                            tagsAfter: tagsAfter
+                        )
+                    )
+
+                    do {
+                        try writeTags(tagsAfter, to: destURL)
+                    } catch {
+                        try await journalWriter.append(
+                            JournalEntry(
+                                planId: planId,
+                                operationId: operation.operationId,
+                                state: .failed,
+                                operationType: .applyTags,
+                                itemId: operation.itemId,
+                                resolvedDestPath: operation.resolvedDestPath,
+                                error: String(describing: error),
+                                tagsBefore: tagsBefore,
+                                tagsAfter: tagsAfter,
+                                reasonCode: ApplyReasonCode.accessError.rawValue
+                            )
+                        )
+                        failed += 1
+                        continue
+                    }
+
+                    try await journalWriter.append(
+                        JournalEntry(
+                            planId: planId,
+                            operationId: operation.operationId,
+                            state: .completed,
+                            operationType: .applyTags,
+                            itemId: operation.itemId,
+                            resolvedDestPath: operation.resolvedDestPath,
+                            tagsBefore: tagsBefore,
+                            tagsAfter: tagsAfter
+                        )
+                    )
+                    completed += 1
+                    continue
                 }
 
                 // Source must exist.
@@ -312,21 +417,7 @@ public struct ApplyEngine: Sendable {
                         journalWriter: journalWriter
                     )
                 case .applyTags:
-                    // Phase 4/5: tag operations. For now, skip.
-                    try await journalWriter.append(
-                        JournalEntry(
-                            planId: planId,
-                            operationId: operation.operationId,
-                            state: .skipped,
-                            operationType: .applyTags,
-                            itemId: operation.itemId,
-                            resolvedDestPath: operation.resolvedDestPath,
-                            error: "applyTags not implemented in Phase 3",
-                            reasonCode: ApplyReasonCode.accessError.rawValue
-                        )
-                    )
-                    skipped += 1
-                    continue
+                    break
                 }
 
                 completed += 1
@@ -383,9 +474,14 @@ public struct ApplyEngine: Sendable {
         for (index, row) in rows.enumerated() {
             let operation = row.operation
             let sourceURL = URL(fileURLWithPath: sourcePathForExecution(row: row, project: project))
-            progressHandler?(index + 1, total, sourceURL.path)
-
             let destURL = URL(fileURLWithPath: operation.resolvedDestPath)
+            let progressPath = operation.operationType == .applyTags ? destURL.path : sourceURL.path
+            progressHandler?(index + 1, total, progressPath)
+
+            if operation.operationType == .applyTags {
+                completed += 1
+                continue
+            }
 
             if !FileManager.default.fileExists(atPath: sourceURL.path) {
                 failed += 1
@@ -792,6 +888,36 @@ public struct ApplyEngine: Sendable {
         }
 
         return FileStat(sizeBytes: fallbackSizeBytes, modifiedTime: fallbackModifiedTime)
+    }
+
+    private func normalizeTagNames(_ tags: [String]) -> [String] {
+        mergeTags(existing: [], additional: tags)
+    }
+
+    private func mergeTags(existing: [String], additional: [String]) -> [String] {
+        var result: [String] = []
+        result.reserveCapacity(existing.count + additional.count)
+        var seen = Set<String>()
+
+        for raw in existing + additional {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if seen.insert(trimmed).inserted {
+                result.append(trimmed)
+            }
+        }
+
+        return result
+    }
+
+    private func readTags(from url: URL) -> [String] {
+        let values = try? url.resourceValues(forKeys: [.tagNamesKey])
+        return values?.tagNames ?? []
+    }
+
+    private func writeTags(_ tags: [String], to url: URL) throws {
+        let nsURL = url as NSURL
+        try nsURL.setResourceValue(tags, forKey: URLResourceKey.tagNamesKey)
     }
 
     private func toExecutionOpType(_ planType: PlanOperationType) -> ExecutionOperationType {

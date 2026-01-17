@@ -82,7 +82,8 @@ public struct VerifyEngine: Sendable {
 
     public func verify(planId: EntityID) async throws -> VerificationResult {
         let rows = try await planStore.fetchPlanOperationExecutionRows(planId: planId)
-        let plannedCount = rows.count
+        let fileRows = rows.filter { $0.operation.operationType != .applyTags }
+        let plannedCount = fileRows.count
 
         let states = try await journalStore.fetchAllStates(planId: planId)
         let stateByOperationId = Dictionary(uniqueKeysWithValues: states.map { ($0.operationId, $0) })
@@ -93,11 +94,11 @@ public struct VerifyEngine: Sendable {
         var plannedBytes: Int64 = 0
         var verifiedBytes: Int64 = 0
         var failures: [VerificationFailure] = []
-        failures.reserveCapacity(rows.count / 10)
+        failures.reserveCapacity(fileRows.count / 10)
 
         let packageDetector = PackageDetector()
 
-        for row in rows {
+        for row in fileRows {
             let op = row.operation
             plannedBytes += row.expectedSizeBytes
 

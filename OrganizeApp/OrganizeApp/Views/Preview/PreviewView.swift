@@ -113,9 +113,12 @@ struct PreviewView: View {
     }
     
     private var filteredOperations: [PlanStore.PlanOperationExecutionRow] {
-        guard !searchText.isEmpty else { return viewModel.operations }
+        let base = viewModel.operations.filter {
+            $0.operation.operationType != .applyTags
+        }
+        guard !searchText.isEmpty else { return base }
         let query = searchText.lowercased()
-        return viewModel.operations.filter { row in
+        return base.filter { row in
             row.sourcePathAtScan.lowercased().contains(query) ||
             row.operation.resolvedDestPath.lowercased().contains(query)
         }

@@ -111,9 +111,12 @@ final class ProjectViewModel {
             
             // Update summary counts based on actual loaded data
             if var summary = planSummary {
+                let fileOperationCount = operations.filter {
+                    $0.operation.operationType == .copyItem || $0.operation.operationType == .moveItem
+                }.count
                 planSummary = PlanBuildSummary(
                     plan: summary.plan,
-                    moveEligibleCount: operations.count,
+                    moveEligibleCount: fileOperationCount,
                     needsReviewCount: needsReviewItems.count,
                     excludedByPolicyCount: excludedItems.count
                 )

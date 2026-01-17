@@ -439,11 +439,44 @@ public struct Planner: Sendable {
             planOperations.append(op)
         }
 
+        let fileOperations = planOperations
+
+        if project.settings.tagsEnabled && !project.settings.tagNames.isEmpty {
+            let startIndex = planOperations.count
+            planOperations.reserveCapacity(planOperations.count + fileOperations.count)
+
+            for (offset, op) in fileOperations.enumerated() {
+                let tagOperationId = computeOperationId(
+                    scanId: scanId,
+                    itemId: op.itemId,
+                    operationType: .applyTags,
+                    executionMode: project.settings.executionMode,
+                    resolvedDestPath: op.resolvedDestPath
+                )
+
+                let tagOp = PlanOperation(
+                    operationId: tagOperationId,
+                    planId: planId,
+                    itemId: op.itemId,
+                    operationType: .applyTags,
+                    executionMode: project.settings.executionMode,
+                    baseDestPath: op.baseDestPath,
+                    resolvedDestPath: op.resolvedDestPath,
+                    collisionResolved: false,
+                    conflictToken: nil,
+                    crossVolume: false,
+                    reasonCode: "",
+                    sortOrder: startIndex + offset
+                )
+                planOperations.append(tagOp)
+            }
+        }
+
         var planToSave = plan
         planToSave.operationCount = planOperations.count
         try await planStore.createPlan(planToSave, items: planItems, operations: planOperations)
 
-        let moveEligibleCount = planOperations.count
+        let moveEligibleCount = fileOperations.count
         let needsReviewCount = planItems.filter { $0.disposition == .needsReview }.count
         let excludedByPolicyCount = planItems.filter { $0.disposition == .excludedByPolicy }.count
 

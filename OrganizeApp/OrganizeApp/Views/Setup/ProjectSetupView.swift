@@ -134,6 +134,11 @@ struct ProjectSetupView: View {
 
             Divider()
 
+            // Advanced Routing Inputs
+            AdvancedRoutingSection(viewModel: viewModel)
+
+            Divider()
+
             // Execution Settings
             ExecutionSettingsSection(viewModel: viewModel)
 
@@ -800,6 +805,57 @@ struct OwnershipSettingsSection: View {
             get: { viewModel.project.settings.ownerMatching.enableDigitSplit },
             set: { viewModel.project.settings.ownerMatching.enableDigitSplit = $0 }
         )
+    }
+}
+
+struct AdvancedRoutingSection: View {
+    @Bindable var viewModel: ProjectViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Advanced Detection")
+                .font(.headline)
+
+            TextField("Screenshot prefixes (comma-separated)", text: screenshotPrefixesBinding)
+                .textFieldStyle(.roundedBorder)
+
+            TextField("Camera prefixes (comma-separated)", text: cameraPrefixesBinding)
+                .textFieldStyle(.roundedBorder)
+
+            TextField("Project markers (comma-separated)", text: projectMarkersBinding)
+                .textFieldStyle(.roundedBorder)
+
+            Text("Markers are used to exclude project/repo folders (e.g., .git, .xcodeproj).")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var screenshotPrefixesBinding: Binding<String> {
+        Binding(
+            get: { viewModel.project.settings.screenshotPrefixes.joined(separator: ", ") },
+            set: { viewModel.project.settings.screenshotPrefixes = parseList($0) }
+        )
+    }
+
+    private var cameraPrefixesBinding: Binding<String> {
+        Binding(
+            get: { viewModel.project.settings.cameraPrefixes.joined(separator: ", ") },
+            set: { viewModel.project.settings.cameraPrefixes = parseList($0) }
+        )
+    }
+
+    private var projectMarkersBinding: Binding<String> {
+        Binding(
+            get: { viewModel.project.settings.projectMarkers.joined(separator: ", ") },
+            set: { viewModel.project.settings.projectMarkers = parseList($0) }
+        )
+    }
+
+    private func parseList(_ text: String) -> [String] {
+        text.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 }
 
