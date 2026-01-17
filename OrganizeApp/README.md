@@ -1,6 +1,9 @@
 # OrganizeApp
 
-A native macOS SwiftUI app for the Organize file management engine.
+A native macOS SwiftUI app for the Organize file management engine. It ships alongside the
+`OrganizeCore` Swift package and the `organize` CLI, giving you three ways to run the same
+scan → plan → apply workflow. This README focuses on the app, but also documents the shared
+engine features you can rely on in any interface.
 
 ## Requirements
 
@@ -59,18 +62,69 @@ OrganizeApp/
     └── Assets.xcassets     # App icons
 ```
 
-## Features
+## What this tool does
+
+Organize turns messy source folders into a structured destination hierarchy by:
+
+1. **Scanning** source roots into an inventory snapshot (with exclusions and size totals).
+2. **Planning** deterministic moves/copies based on file type, date, and owner keywords.
+3. **Previewing** and exporting the plan for review (including “needs review” items).
+4. **Applying** the plan with journaling to support resume, verify, and rollback.
+
+The macOS app offers a guided UI for these steps, while `OrganizeCore` exposes the same
+capabilities for the CLI and other integrations.
+
+## Features (UI + Engine)
 
 - **Project Management**: Create, delete, and switch between projects
 - **Source Selection**: Drag-drop folders or browse via file picker
 - **People Configuration**: Add people with keyword tokens for file routing
-- **Scan & Plan**: Scan sources and generate deterministic execution plans
+- **Scan & Plan**: Build an inventory snapshot and deterministic execution plan
 - **Preview**: View operations, needs-review items, and excluded files in tabs
-- **Apply**: Execute plan with progress tracking
-- **Verify**: Confirm all operations completed successfully
-- **Delete Originals**: Remove source files (with confirmation dialog)
-- **Rollback**: Reverse applied operations
+- **Apply**: Execute plan with progress tracking and crash-safe journaling
+- **Verify**: Confirm operations completed successfully with integrity checks
+- **Delete Originals**: Remove source files after successful copy workflows
+- **Rollback**: Reverse applied operations using the execution journal
+- **Exports**: CSV exports for inventory, proposed moves, needs review, and exclusions
+- **Collision Handling**: Avoid destination conflicts with collision resolution rules
 - **Stale Bookmark Relink**: UI to restore access when folder paths change
+
+### File classification and routing
+
+`OrganizeCore` classifies items into organized categories (docs, sheets, scans, PDFs, images,
+and more) and builds a destination path based on your project settings. The planner can:
+
+- Route items into a destination tree using category, topic, and date buckets.
+- Apply owner keywords (people tokens) to influence routing.
+- Mark items as **Move Eligible**, **Needs Review**, or **Excluded by Policy**.
+
+### Safety & auditability
+
+The engine is designed to make large file operations safer and recoverable:
+
+- **Journaling** records each copy/move operation for resume and rollback.
+- **Verification** checks applied results and can emit CSV reports.
+- **Delete Originals** is gated by confirmation and backed by the journal.
+- **Cross-volume moves** are detected and handled with copy-then-delete flows.
+
+### Exclusions & special cases
+
+The scanner and planner account for common edge cases:
+
+- Packages, aliases, and cloud-only files are detected and excluded when needed.
+- Policy exclusions handle code, config, installers, archives, and videos.
+- The planner tracks exclusion reasons for UI and CSV reporting.
+
+## Command-line interface (CLI)
+
+The `organize` CLI exposes the same workflow as the UI:
+
+- `organize scan` — scan sources into an inventory snapshot.
+- `organize plan` — generate a deterministic plan and export CSVs.
+- `organize apply` — execute the plan with journaling.
+- `organize verify` — verify applied operations and generate reports.
+- `organize delete-originals` — delete source files after copy workflows.
+- `organize rollback` — reverse a completed plan using the journal.
 
 ## Sandbox & Permissions
 
