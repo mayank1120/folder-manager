@@ -43,6 +43,54 @@ final class OwnerMatcherTests: XCTestCase {
         XCTAssertEqual(result.reason, .noMatch)
     }
 
+    func testOwnerMatcherCamelCaseSplittingMatches() {
+        let people = [
+            Person(displayName: "Juhi", keywordTokens: ["juhi"])
+        ]
+
+        let matcher = OwnerMatcher(
+            people: people,
+            settings: OwnerMatchingSettings(enableCamelCaseSplit: true)
+        )
+        let result = matcher.match(path: "Docs/JuhiBansal.pdf")
+
+        XCTAssertEqual(result.bucketName, "Juhi")
+        XCTAssertEqual(result.confidence, .confident)
+        XCTAssertEqual(result.reason, .singleMatch)
+    }
+
+    func testOwnerMatcherPreservesOriginalTokenWhenCamelCaseSplitting() {
+        let people = [
+            Person(displayName: "John", keywordTokens: ["johndoe"])
+        ]
+
+        let matcher = OwnerMatcher(
+            people: people,
+            settings: OwnerMatchingSettings(enableCamelCaseSplit: true)
+        )
+        let result = matcher.match(path: "Docs/JohnDoe.pdf")
+
+        XCTAssertEqual(result.bucketName, "John")
+        XCTAssertEqual(result.confidence, .confident)
+        XCTAssertEqual(result.reason, .singleMatch)
+    }
+
+    func testOwnerMatcherPreservesOriginalTokenWhenDigitSplitting() {
+        let people = [
+            Person(displayName: "Camera", keywordTokens: ["img2024"])
+        ]
+
+        let matcher = OwnerMatcher(
+            people: people,
+            settings: OwnerMatchingSettings(enableCamelCaseSplit: false, enableDigitSplit: true)
+        )
+        let result = matcher.match(path: "Photos/IMG2024.jpg")
+
+        XCTAssertEqual(result.bucketName, "Camera")
+        XCTAssertEqual(result.confidence, .confident)
+        XCTAssertEqual(result.reason, .singleMatch)
+    }
+
     func testOwnerMatcherDecodingDoesNotBreakCaseInsensitiveMatch() throws {
         let json = """
         {
@@ -272,6 +320,102 @@ final class PlannerIntegrationTests: XCTestCase {
         // Proposed moves: 2 Mayank invoices (one collision-resolved) + 1 Juhi image.
         XCTAssertEqual(proposedMovesCSV.split(separator: "\n").count, 1 + 3)
         XCTAssertTrue(proposedMovesCSV.contains("conflict-"))
+    }
+
+    func testExtensionRuleCustomFolderPerOwner() async throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let root = tempDir.appendingPathComponent("root")
+        let destRoot = tempDir.appendingPathComponent("dest")
+        let customPDFs = tempDir.appendingPathComponent("custom-pdfs")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: customPDFs, withIntermediateDirectories: true)
+
+        try writeFile(root.appendingPathComponent("Mayank-report.pdf"), contents: "a")
+
+        var project = Project(
+            name: "Test",
+            sourceRoots: [SourceRoot(path: root.path)],
+            destinationRoot: DestinationRoot(path: destRoot.path),
+            people: [Person(displayName: "Mayank", keywordTokens: ["mayank"])]
+        )
+
+        let rule = ExtensionRule(
+            extensions: ["pdf"],
+            destinationType: .customFolder,
+            destinationPath: customPDFs.path,
+            destinationIsAbsolute: true,
+            ownerScope: .perOwner,
+            priority: 10
+        )
+        project.settings.extensionRules = [rule]
+
+        let dbURL = tempDir.appendingPathComponent("organize.db")
+        let dbManager = try DatabaseManager(path: dbURL.path)
+        let inventoryStore = InventoryStore(dbManager: dbManager)
+        let scanner = Scanner(inventoryStore: inventoryStore)
+        let scanResult = try await scanner.scan(project: project)
+
+        let planStore = PlanStore(dbManager: dbManager)
+        let planner = Planner(inventoryStore: inventoryStore, planStore: planStore)
+        let summary = try await planner.createPlan(project: project, scanId: scanResult.scan.id)
+
+        let planItems = try await planStore.fetchPlanItemRows(
+            planId: summary.plan.id,
+            disposition: .moveEligible
+        )
+        XCTAssertEqual(planItems.count, 1)
+
+        let item = planItems[0].planItem
+        let expectedDest = customPDFs
+            .appendingPathComponent("Mayank")
+            .appendingPathComponent("Mayank-report.pdf")
+            .path
+        XCTAssertEqual(item.baseDestPath, expectedDest)
+        XCTAssertEqual(item.classificationSource, .extensionRule)
+        XCTAssertEqual(item.matchedRuleId, rule.id.uuidString)
+    }
+
+    func testExtensionExclusionBlocksByUserList() async throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let root = tempDir.appendingPathComponent("root")
+        let destRoot = tempDir.appendingPathComponent("dest")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destRoot, withIntermediateDirectories: true)
+
+        try writeFile(root.appendingPathComponent("Mayank-report.pdf"), contents: "a")
+
+        var project = Project(
+            name: "Test",
+            sourceRoots: [SourceRoot(path: root.path)],
+            destinationRoot: DestinationRoot(path: destRoot.path),
+            people: [Person(displayName: "Mayank", keywordTokens: ["mayank"])]
+        )
+        project.settings.extensionExclusions = ExtensionExclusions(
+            excludeMode: .excludeOnlyThese,
+            excludedExtensions: ["pdf"]
+        )
+
+        let dbURL = tempDir.appendingPathComponent("organize.db")
+        let dbManager = try DatabaseManager(path: dbURL.path)
+        let inventoryStore = InventoryStore(dbManager: dbManager)
+        let scanner = Scanner(inventoryStore: inventoryStore)
+        let scanResult = try await scanner.scan(project: project)
+
+        let planStore = PlanStore(dbManager: dbManager)
+        let planner = Planner(inventoryStore: inventoryStore, planStore: planStore)
+        let summary = try await planner.createPlan(project: project, scanId: scanResult.scan.id)
+
+        let excluded = try await planStore.fetchPlanItemRows(
+            planId: summary.plan.id,
+            disposition: .excludedByPolicy
+        )
+        XCTAssertEqual(excluded.count, 1)
+        XCTAssertEqual(excluded[0].planItem.reasonCode, PlanReasonCode.policyExcludeUserExtension.rawValue)
     }
 }
 

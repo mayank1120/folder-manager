@@ -63,6 +63,9 @@ public struct ProjectSettings: Codable, Sendable, Hashable {
     public var screenshotPrefixes: [String]
     public var cameraPrefixes: [String]
     public var projectMarkers: [String]
+    public var extensionRules: [ExtensionRule]
+    public var extensionExclusions: ExtensionExclusions
+    public var ownerMatching: OwnerMatchingSettings
     
     public init(
         autoFileUnassigned: Bool = false,
@@ -76,7 +79,10 @@ public struct ProjectSettings: Codable, Sendable, Hashable {
         tagNames: [String] = [],
         screenshotPrefixes: [String] = ["Screenshot", "Screen Shot"],
         cameraPrefixes: [String] = ["IMG_", "DSC_", "PXL_"],
-        projectMarkers: [String] = [".git", ".svn", ".hg", "package.json", "Cargo.toml", "go.mod", "pyproject.toml", "requirements.txt", "Pipfile", "Podfile"]
+        projectMarkers: [String] = [".git", ".svn", ".hg", "package.json", "Cargo.toml", "go.mod", "pyproject.toml", "requirements.txt", "Pipfile", "Podfile"],
+        extensionRules: [ExtensionRule] = [],
+        extensionExclusions: ExtensionExclusions = ExtensionExclusions(),
+        ownerMatching: OwnerMatchingSettings = OwnerMatchingSettings()
     ) {
         self.autoFileUnassigned = autoFileUnassigned
         self.autoFileShared = autoFileShared
@@ -90,6 +96,50 @@ public struct ProjectSettings: Codable, Sendable, Hashable {
         self.screenshotPrefixes = screenshotPrefixes
         self.cameraPrefixes = cameraPrefixes
         self.projectMarkers = projectMarkers
+        self.extensionRules = extensionRules
+        self.extensionExclusions = extensionExclusions
+        self.ownerMatching = ownerMatching
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case autoFileUnassigned
+        case autoFileShared
+        case executionMode
+        case collisionPolicy
+        case deleteOriginalsMode
+        case downloadBeforeProcessing
+        case enableOtherBucket
+        case tagsEnabled
+        case tagNames
+        case screenshotPrefixes
+        case cameraPrefixes
+        case projectMarkers
+        case extensionRules
+        case extensionExclusions
+        case ownerMatching
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        self.autoFileUnassigned = try container.decodeIfPresent(Bool.self, forKey: .autoFileUnassigned) ?? false
+        self.autoFileShared = try container.decodeIfPresent(Bool.self, forKey: .autoFileShared) ?? false
+        self.executionMode = try container.decodeIfPresent(ExecutionMode.self, forKey: .executionMode) ?? .copyFirst
+        self.collisionPolicy = try container.decodeIfPresent(CollisionPolicy.self, forKey: .collisionPolicy) ?? .autoSuffix
+        self.deleteOriginalsMode = try container.decodeIfPresent(DeleteOriginalsMode.self, forKey: .deleteOriginalsMode) ?? .moveToTrash
+        self.downloadBeforeProcessing = try container.decodeIfPresent(Bool.self, forKey: .downloadBeforeProcessing) ?? false
+        self.enableOtherBucket = try container.decodeIfPresent(Bool.self, forKey: .enableOtherBucket) ?? false
+        self.tagsEnabled = try container.decodeIfPresent(Bool.self, forKey: .tagsEnabled) ?? false
+        self.tagNames = try container.decodeIfPresent([String].self, forKey: .tagNames) ?? []
+        self.screenshotPrefixes = try container.decodeIfPresent([String].self, forKey: .screenshotPrefixes) ?? ["Screenshot", "Screen Shot"]
+        self.cameraPrefixes = try container.decodeIfPresent([String].self, forKey: .cameraPrefixes) ?? ["IMG_", "DSC_", "PXL_"]
+        self.projectMarkers = try container.decodeIfPresent([String].self, forKey: .projectMarkers)
+            ?? [".git", ".svn", ".hg", "package.json", "Cargo.toml", "go.mod", "pyproject.toml", "requirements.txt", "Pipfile", "Podfile"]
+        self.extensionRules = try container.decodeIfPresent([ExtensionRule].self, forKey: .extensionRules) ?? []
+        self.extensionExclusions = try container.decodeIfPresent(ExtensionExclusions.self, forKey: .extensionExclusions)
+            ?? ExtensionExclusions()
+        self.ownerMatching = try container.decodeIfPresent(OwnerMatchingSettings.self, forKey: .ownerMatching)
+            ?? OwnerMatchingSettings()
     }
 }
 

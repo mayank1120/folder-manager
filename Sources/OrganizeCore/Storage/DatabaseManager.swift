@@ -98,6 +98,8 @@ public actor DatabaseManager {
                 t.column("suggested_resolved_dest_path", .text)
                 t.column("reason_code", .text)
                 t.column("issue_type", .text)
+                t.column("matched_rule_id", .text)
+                t.column("classification_source", .text)
                 t.primaryKey(["plan_id", "item_id"])
                 t.foreignKey(["plan_id"], references: "plans", columns: ["plan_id"])
                 t.foreignKey(["item_id"], references: "inventory_items", columns: ["item_id"])
@@ -151,6 +153,7 @@ public actor DatabaseManager {
             
             // Migrate execution_journal if columns are missing
             try Self.ensureExecutionJournalColumns(db: db)
+            try Self.ensurePlanItemsColumns(db: db)
             
             // Indexes
             try db.create(index: "idx_inventory_scan", on: "inventory_items", columns: ["scan_id"], ifNotExists: true)
@@ -240,6 +243,18 @@ public actor DatabaseManager {
         }
         if !existingColumns.contains("error") {
             try db.execute(sql: "ALTER TABLE execution_journal ADD COLUMN error TEXT")
+        }
+    }
+
+    private static func ensurePlanItemsColumns(db: Database) throws {
+        let rows = try Row.fetchAll(db, sql: "PRAGMA table_info(plan_items)")
+        let existingColumns = Set(rows.compactMap { $0["name"] as String? })
+
+        if !existingColumns.contains("matched_rule_id") {
+            try db.execute(sql: "ALTER TABLE plan_items ADD COLUMN matched_rule_id TEXT")
+        }
+        if !existingColumns.contains("classification_source") {
+            try db.execute(sql: "ALTER TABLE plan_items ADD COLUMN classification_source TEXT")
         }
     }
     

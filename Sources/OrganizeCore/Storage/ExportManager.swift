@@ -41,7 +41,9 @@ public struct ExportManager: Sendable {
                 "isPackage", "sizeBytes", "modifiedTime", "createdTime", "exifDateTimeOriginal",
                 "isCloudOnly", "uttypeIdentifier", "extension", "routingDate", "routingDateSource",
                 "proposedOwnerBucket", "ownerReason", "ownerConfidence", "proposedCategory",
-                "proposedSubcategory", "baseDestPath", "resolvedDestPath", "disposition", "reason"
+                "proposedSubcategory", "baseDestPath", "resolvedDestPath",
+                "matchedRuleId", "classificationSource",
+                "disposition", "reason"
             ],
             rows: inventoryRows.map { $0.csvRow }
         )
@@ -54,6 +56,7 @@ public struct ExportManager: Sendable {
                 "baseDestPath", "resolvedDestPath",
                 "ownerBucket", "ownerReason", "ownerConfidence",
                 "category", "subcategory",
+                "matchedRuleId", "classificationSource",
                 "collisionResolved", "conflictToken", "crossVolume", "reason"
             ],
             rows: proposedMovesRows.map { $0.csvRow }
@@ -105,6 +108,8 @@ public struct ExportManager: Sendable {
         let proposedSubcategory: String?
         let baseDestPath: String?
         let resolvedDestPath: String?
+        let matchedRuleId: String?
+        let classificationSource: String?
         let disposition: String
         let reason: String?
 
@@ -132,6 +137,8 @@ public struct ExportManager: Sendable {
                 proposedSubcategory,
                 baseDestPath,
                 resolvedDestPath,
+                matchedRuleId,
+                classificationSource,
                 disposition,
                 reason
             ]
@@ -165,6 +172,8 @@ public struct ExportManager: Sendable {
                       p.subcategory,
                       p.base_dest_path,
                       p.suggested_resolved_dest_path,
+                      p.matched_rule_id,
+                      p.classification_source,
                       p.reason_code
                     FROM inventory_items i
                     JOIN plan_items p
@@ -221,6 +230,8 @@ public struct ExportManager: Sendable {
                     proposedSubcategory: row["subcategory"],
                     baseDestPath: row["base_dest_path"],
                     resolvedDestPath: row["suggested_resolved_dest_path"],
+                    matchedRuleId: row["matched_rule_id"],
+                    classificationSource: row["classification_source"],
                     disposition: disposition,
                     reason: row["reason_code"]
                 )
@@ -242,6 +253,8 @@ public struct ExportManager: Sendable {
         let ownerConfidence: String?
         let category: String?
         let subcategory: String?
+        let matchedRuleId: String?
+        let classificationSource: String?
         let collisionResolved: Bool
         let conflictToken: String?
         let crossVolume: Bool
@@ -260,6 +273,8 @@ public struct ExportManager: Sendable {
                 ownerConfidence,
                 category,
                 subcategory,
+                matchedRuleId,
+                classificationSource,
                 collisionResolved ? "true" : "false",
                 conflictToken,
                 crossVolume ? "true" : "false",
@@ -286,6 +301,8 @@ public struct ExportManager: Sendable {
                       p.owner_confidence,
                       p.category,
                       p.subcategory,
+                      p.matched_rule_id,
+                      p.classification_source,
                       o.collision_resolved,
                       o.conflict_token,
                       o.cross_volume,
@@ -327,6 +344,8 @@ public struct ExportManager: Sendable {
                     ownerConfidence: row["owner_confidence"],
                     category: row["category"],
                     subcategory: row["subcategory"],
+                    matchedRuleId: row["matched_rule_id"],
+                    classificationSource: row["classification_source"],
                     collisionResolved: (row["collision_resolved"] as Int? ?? 0) == 1,
                     conflictToken: row["conflict_token"],
                     crossVolume: (row["cross_volume"] as Int? ?? 0) == 1,

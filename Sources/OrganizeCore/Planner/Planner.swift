@@ -36,9 +36,23 @@ public struct Planner: Sendable {
         let scanSourceRoots = try await inventoryStore.fetchScanSourceRoots(for: scanId)
         let scanRootById = Dictionary(uniqueKeysWithValues: scanSourceRoots.map { ($0.sourceRootId, $0.pathAtScan) })
 
-        let ownerMatcher = OwnerMatcher(people: project.people)
+        let ownerMatcher = OwnerMatcher(people: project.people, settings: project.settings.ownerMatching)
         let typeClassifier = TypeClassifier(settings: project.settings)
         let dispositionEngine = DispositionEngine()
+        let extensionExclusions = project.settings.extensionExclusions
+        let excludedExtensionSet = Set(ExtensionRule.normalizeExtensions(extensionExclusions.excludedExtensions))
+
+        let orderedExtensionRules = project.settings.extensionRules
+            .filter { $0.enabled }
+            .sorted { lhs, rhs in
+                if lhs.priority != rhs.priority {
+                    return lhs.priority > rhs.priority
+                }
+                if lhs.createdAt != rhs.createdAt {
+                    return lhs.createdAt < rhs.createdAt
+                }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
 
         let destRootURL = URL(fileURLWithPath: destinationRoot).standardizedFileURL
         let destDeviceId = Self.deviceId(path: destRootURL.path)
@@ -59,6 +73,8 @@ public struct Planner: Sendable {
             var resolvedDestPath: String?
             var collisionResolved: Bool
             var conflictToken: String?
+            var matchedRuleId: String?
+            var classificationSource: ClassificationSource?
         }
 
         var working: [WorkingItem] = []
@@ -73,21 +89,72 @@ public struct Planner: Sendable {
             let owner = ownerMatcher.match(path: item.relativePath)
             let policyExclude = dispositionEngine.policyExclusionReason(for: item)
 
+            let ext = normalizeExtension(for: item)
+            let isExtensionExcluded = policyExclude == nil
+                && shouldExcludeExtension(
+                    ext,
+                    exclusions: extensionExclusions,
+                    excludedSet: excludedExtensionSet
+                )
+
+            let matchedRule: ExtensionRule? = {
+                guard policyExclude == nil, !isExtensionExcluded, !ext.isEmpty else {
+                    return nil
+                }
+                return matchExtensionRule(
+                    ext: ext,
+                    owner: owner,
+                    rules: orderedExtensionRules
+                )
+            }()
+
             var classification: TypeClassification?
-            if policyExclude == nil {
+            var baseDestPath: String?
+            var matchedRuleId: String?
+            var classificationSource: ClassificationSource?
+
+            if let rule = matchedRule {
+                matchedRuleId = rule.id.uuidString
+                classificationSource = .extensionRule
+
+                switch rule.destinationType {
+                case .customFolder:
+                    baseDestPath = buildCustomDestPath(
+                        destinationRoot: destRootURL,
+                        ownerBucketFolder: owner.bucketName,
+                        rule: rule,
+                        item: item
+                    )
+                case .organizedRoot:
+                    classification = typeClassifier.classify(item: item)
+                    if classification == nil, project.settings.enableOtherBucket {
+                        classification = TypeClassification(category: .other)
+                    }
+                    baseDestPath = classification.flatMap { cls in
+                        buildBaseDestPath(
+                            destinationRoot: destRootURL,
+                            ownerBucketFolder: owner.bucketName,
+                            classification: cls,
+                            item: item
+                        )
+                    }
+                }
+            } else if policyExclude == nil {
                 classification = typeClassifier.classify(item: item)
                 if classification == nil, project.settings.enableOtherBucket {
                     classification = TypeClassification(category: .other)
                 }
-            }
-
-            let baseDestPath = classification.flatMap { cls in
-                buildBaseDestPath(
-                    destinationRoot: destRootURL,
-                    ownerBucketFolder: owner.bucketName,
-                    classification: cls,
-                    item: item
-                )
+                if classification != nil {
+                    classificationSource = .uttype
+                }
+                baseDestPath = classification.flatMap { cls in
+                    buildBaseDestPath(
+                        destinationRoot: destRootURL,
+                        ownerBucketFolder: owner.bucketName,
+                        classification: cls,
+                        item: item
+                    )
+                }
             }
 
             var disposition: Disposition = .needsReview
@@ -98,7 +165,11 @@ public struct Planner: Sendable {
                 disposition = .excludedByPolicy
                 reasonCode = policyExclude.rawValue
                 issueType = nil
-            } else if classification == nil || baseDestPath == nil {
+            } else if isExtensionExcluded {
+                disposition = .excludedByPolicy
+                reasonCode = PlanReasonCode.policyExcludeUserExtension.rawValue
+                issueType = nil
+            } else if baseDestPath == nil {
                 disposition = .needsReview
                 reasonCode = PlanReasonCode.needsReviewUnmappedType.rawValue
                 issueType = NeedsReviewIssueType.unmappedType.rawValue
@@ -118,6 +189,10 @@ public struct Planner: Sendable {
                 disposition = .moveEligible
             }
 
+            if disposition == .moveEligible, matchedRuleId != nil, reasonCode == nil {
+                reasonCode = PlanReasonCode.categoryByExtension.rawValue
+            }
+
             working.append(
                 WorkingItem(
                     item: item,
@@ -130,7 +205,9 @@ public struct Planner: Sendable {
                     issueType: issueType,
                     resolvedDestPath: nil,
                     collisionResolved: false,
-                    conflictToken: nil
+                    conflictToken: nil,
+                    matchedRuleId: matchedRuleId,
+                    classificationSource: classificationSource
                 )
             )
         }
@@ -224,7 +301,9 @@ public struct Planner: Sendable {
                     baseDestPath: w.baseDestPath,
                     suggestedResolvedDestPath: w.resolvedDestPath,
                     reasonCode: w.reasonCode,
-                    issueType: w.issueType
+                    issueType: w.issueType,
+                    matchedRuleId: w.matchedRuleId,
+                    classificationSource: w.classificationSource
                 )
             )
         }
@@ -327,6 +406,83 @@ public struct Planner: Sendable {
     }
 
     // MARK: - Destination Paths
+
+    private func normalizeExtension(for item: InventoryItem) -> String {
+        let ext = (item.extension ?? URL(fileURLWithPath: item.relativePath).pathExtension)
+        return ExtensionRule.normalizeExtension(ext)
+    }
+
+    private func shouldExcludeExtension(
+        _ ext: String,
+        exclusions: ExtensionExclusions,
+        excludedSet: Set<String>
+    ) -> Bool {
+        guard !ext.isEmpty else {
+            return exclusions.excludeMode == .excludeAllExceptThese
+        }
+
+        switch exclusions.excludeMode {
+        case .none:
+            return false
+        case .excludeOnlyThese:
+            return excludedSet.contains(ext)
+        case .excludeAllExceptThese:
+            return !excludedSet.contains(ext)
+        }
+    }
+
+    private func matchExtensionRule(
+        ext: String,
+        owner: OwnerAssignment,
+        rules: [ExtensionRule]
+    ) -> ExtensionRule? {
+        for rule in rules where rule.matches(extension: ext) {
+            if ruleApplies(rule, owner: owner) {
+                return rule
+            }
+        }
+        return nil
+    }
+
+    private func ruleApplies(_ rule: ExtensionRule, owner: OwnerAssignment) -> Bool {
+        switch rule.ownerScope {
+        case .perOwner:
+            return true
+        case .sharedOnly:
+            if case .shared = owner.bucketKind {
+                return true
+            }
+            return false
+        case .allOwners:
+            return true
+        }
+    }
+
+    private func buildCustomDestPath(
+        destinationRoot: URL,
+        ownerBucketFolder: String,
+        rule: ExtensionRule,
+        item: InventoryItem
+    ) -> String? {
+        guard let destPath = rule.destinationPath, !destPath.isEmpty else {
+            return nil
+        }
+
+        let baseURL: URL
+        if rule.destinationIsAbsolute {
+            baseURL = URL(fileURLWithPath: destPath).standardizedFileURL
+        } else {
+            baseURL = destinationRoot.appendingPathComponent(destPath).standardizedFileURL
+        }
+
+        var dir = baseURL
+        if rule.ownerScope != .allOwners {
+            dir = dir.appendingPathComponent(ownerBucketFolder)
+        }
+
+        let fileName = URL(fileURLWithPath: item.relativePath).lastPathComponent
+        return dir.appendingPathComponent(fileName).path
+    }
 
     private func buildBaseDestPath(
         destinationRoot: URL,
