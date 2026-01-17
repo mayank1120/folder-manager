@@ -38,11 +38,14 @@ final class DeleteOriginalsTests: XCTestCase {
         let applyResult = try await applyEngine.apply(planId: summary.plan.id, project: project, projectDirectory: tempDir)
         XCTAssertEqual(applyResult.completedCount, 2)
 
+        // Force delete-originals to bypass verification gate; this test targets the pre-delete
+        // source modification check, which should still skip the item.
         let deleteEngine = DeleteOriginalsEngine(dbManager: dbManager)
         let deleteResult = try await deleteEngine.deleteOriginals(
             planId: summary.plan.id,
             project: project,
-            projectDirectory: tempDir
+            projectDirectory: tempDir,
+            force: true
         )
 
         XCTAssertEqual(deleteResult.totalEligible, 2)
@@ -143,17 +146,73 @@ final class DeleteOriginalsTests: XCTestCase {
         // Modify source after apply.
         try writeFile(src.appendingPathComponent("Mayank-document.pdf"), contents: "hello world modified")
 
+        // Force delete-originals to bypass verification gate; this test targets the pre-delete
+        // source modification check, which should still skip the item.
         let deleteEngine = DeleteOriginalsEngine(dbManager: dbManager)
         let deleteResult = try await deleteEngine.deleteOriginals(
             planId: summary.plan.id,
             project: project,
-            projectDirectory: tempDir
+            projectDirectory: tempDir,
+            force: true
         )
 
         XCTAssertEqual(deleteResult.deletedCount, 0)
         XCTAssertEqual(deleteResult.skippedCount, 1)
 
         // Source file should still exist.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: src.appendingPathComponent("Mayank-document.pdf").path))
+    }
+
+    func testDeleteOriginalsSkipsWhenDestinationMissing() async throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let src = tempDir.appendingPathComponent("src")
+        let dest = tempDir.appendingPathComponent("dest")
+        try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+
+        try writeFile(src.appendingPathComponent("Mayank-document.pdf"), contents: "hello")
+
+        let project = Project(
+            name: "Test",
+            sourceRoots: [SourceRoot(path: src.path)],
+            destinationRoot: DestinationRoot(path: dest.path),
+            people: [Person(displayName: "Mayank", keywordTokens: ["Mayank"])]
+        )
+
+        let dbURL = tempDir.appendingPathComponent("organize.db")
+        let dbManager = try DatabaseManager(path: dbURL.path)
+        let inventoryStore = InventoryStore(dbManager: dbManager)
+        let planStore = PlanStore(dbManager: dbManager)
+
+        let scanner = Scanner(inventoryStore: inventoryStore)
+        let scanResult = try await scanner.scan(project: project)
+
+        let planner = Planner(inventoryStore: inventoryStore, planStore: planStore)
+        let summary = try await planner.createPlan(project: project, scanId: scanResult.scan.id)
+
+        let applyEngine = ApplyEngine(dbManager: dbManager)
+        _ = try await applyEngine.apply(planId: summary.plan.id, project: project, projectDirectory: tempDir)
+
+        let ops = try await planStore.fetchPlanOperationExecutionRows(planId: summary.plan.id)
+        let destPath = ops.first?.operation.resolvedDestPath
+        XCTAssertNotNil(destPath)
+
+        if let destPath {
+            try FileManager.default.removeItem(atPath: destPath)
+        }
+
+        let deleteEngine = DeleteOriginalsEngine(dbManager: dbManager)
+        let deleteResult = try await deleteEngine.deleteOriginals(
+            planId: summary.plan.id,
+            project: project,
+            projectDirectory: tempDir,
+            force: true
+        )
+
+        XCTAssertEqual(deleteResult.deletedCount, 0)
+        XCTAssertEqual(deleteResult.skippedCount, 1)
         XCTAssertTrue(FileManager.default.fileExists(atPath: src.appendingPathComponent("Mayank-document.pdf").path))
     }
 

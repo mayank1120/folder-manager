@@ -1,9 +1,11 @@
 import Foundation
+import CryptoKit
 
 public enum VerificationIssue: String, Codable, Sendable {
     case notCompleted = "NotCompleted"
     case destinationMissing = "DestinationMissing"
     case sizeMismatch = "SizeMismatch"
+    case hashMismatch = "HashMismatch"
 }
 
 public struct VerificationFailure: Sendable {
@@ -71,6 +73,7 @@ public struct VerificationResult: Sendable {
 public struct VerifyEngine: Sendable {
     private let planStore: PlanStore
     private let journalStore: JournalStore
+    private let hashThresholdBytes: Int64 = 5 * 1024 * 1024
 
     public init(dbManager: DatabaseManager) {
         self.planStore = PlanStore(dbManager: dbManager)
@@ -182,6 +185,45 @@ public struct VerifyEngine: Sendable {
                 continue
             }
 
+            if !row.isPackage && row.expectedSizeBytes <= hashThresholdBytes {
+                let sourceURL = URL(fileURLWithPath: row.sourcePathAtScan)
+                if FileManager.default.fileExists(atPath: sourceURL.path) {
+                    do {
+                        let sourceHash = try sha256Hex(for: sourceURL)
+                        let destHash = try sha256Hex(for: destURL)
+                        if sourceHash != destHash {
+                            failures.append(
+                                VerificationFailure(
+                                    operationId: op.operationId,
+                                    itemId: op.itemId,
+                                    expectedPath: destURL.path,
+                                    issue: .hashMismatch,
+                                    expectedSizeBytes: row.expectedSizeBytes,
+                                    actualSizeBytes: actualSize,
+                                    detail: "SHA-256 mismatch"
+                                )
+                            )
+                            failedCount += 1
+                            continue
+                        }
+                    } catch {
+                        failures.append(
+                            VerificationFailure(
+                                operationId: op.operationId,
+                                itemId: op.itemId,
+                                expectedPath: destURL.path,
+                                issue: .hashMismatch,
+                                expectedSizeBytes: row.expectedSizeBytes,
+                                actualSizeBytes: actualSize,
+                                detail: "Hash error: \(error)"
+                            )
+                        )
+                        failedCount += 1
+                        continue
+                    }
+                }
+            }
+
             completedCount += 1
             verifiedBytes += actualSize
         }
@@ -242,5 +284,24 @@ public struct VerifyEngine: Sendable {
             escaped = "\"\(escaped)\""
         }
         return escaped
+    }
+
+    // MARK: - Hashing
+
+    private func sha256Hex(for url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+
+        var hasher = SHA256()
+        while true {
+            let data = handle.readData(ofLength: 1024 * 1024)
+            if data.isEmpty {
+                break
+            }
+            hasher.update(data: data)
+        }
+
+        let digest = hasher.finalize()
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 }

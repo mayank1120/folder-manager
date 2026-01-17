@@ -124,6 +124,55 @@ final class ExecutionEngineTests: XCTestCase {
         XCTAssertEqual(verifyResult.failedCount, 0)
     }
 
+    func testVerifyDetectsHashMismatchWhenSizeSame() async throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let src = tempDir.appendingPathComponent("src")
+        let dest = tempDir.appendingPathComponent("dest")
+        try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+
+        try writeFile(src.appendingPathComponent("Mayank-note.txt"), contents: "hello")
+
+        let project = Project(
+            name: "Test",
+            sourceRoots: [SourceRoot(path: src.path)],
+            destinationRoot: DestinationRoot(path: dest.path),
+            people: [Person(displayName: "Mayank", keywordTokens: ["Mayank"])]
+        )
+
+        let dbURL = tempDir.appendingPathComponent("organize.db")
+        let dbManager = try DatabaseManager(path: dbURL.path)
+        let inventoryStore = InventoryStore(dbManager: dbManager)
+        let planStore = PlanStore(dbManager: dbManager)
+
+        let scanner = Scanner(inventoryStore: inventoryStore)
+        let scanResult = try await scanner.scan(project: project)
+
+        let planner = Planner(inventoryStore: inventoryStore, planStore: planStore)
+        let summary = try await planner.createPlan(project: project, scanId: scanResult.scan.id)
+
+        let applyEngine = ApplyEngine(dbManager: dbManager)
+        _ = try await applyEngine.apply(planId: summary.plan.id, project: project, projectDirectory: tempDir)
+
+        let ops = try await planStore.fetchPlanOperationExecutionRows(planId: summary.plan.id)
+        guard let destPath = ops.first?.operation.resolvedDestPath else {
+            XCTFail("Missing destination path")
+            return
+        }
+
+        // Change destination content but keep size the same to trigger hash mismatch.
+        try Data("world".utf8).write(to: URL(fileURLWithPath: destPath), options: .atomic)
+
+        let verifyEngine = VerifyEngine(dbManager: dbManager)
+        let verifyResult = try await verifyEngine.verify(planId: summary.plan.id)
+
+        XCTAssertFalse(verifyResult.passed)
+        XCTAssertEqual(verifyResult.failedCount, 1)
+        XCTAssertEqual(verifyResult.failures.first?.issue, .hashMismatch)
+    }
+
     func testApplySkipsCloudOnlyWhenDownloadBeforeProcessingOff() async throws {
         let tempDir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: tempDir) }

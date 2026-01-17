@@ -230,25 +230,35 @@ public struct ProjectMarkerDetector: Sendable {
     
     /// Check if directory contains project markers
     public func containsProjectMarker(at url: URL) -> Bool {
-        guard let contents = try? FileManager.default.contentsOfDirectory(atPath: url.path) else {
-            return false
-        }
-        
-        for item in contents {
-            // Check exact match
-            if exactMarkers.contains(item) {
+        let fm = FileManager.default
+
+        // Fast path: check exact marker names via fileExists (avoids listing directory contents).
+        for marker in exactMarkers {
+            let markerURL = url.appendingPathComponent(marker)
+            if fm.fileExists(atPath: markerURL.path) {
                 return true
             }
-            
-            // Check suffix match
-            let lowerItem = item.lowercased()
+        }
+
+        // Suffix markers require scanning direct children, but we can early-exit without building arrays.
+        guard !suffixMarkers.isEmpty,
+              let enumerator = fm.enumerator(
+                at: url,
+                includingPropertiesForKeys: [.nameKey],
+                options: [.skipsSubdirectoryDescendants]
+              ) else {
+            return false
+        }
+
+        for case let childURL as URL in enumerator {
+            let lowerName = childURL.lastPathComponent.lowercased()
             for suffix in suffixMarkers {
-                if lowerItem.hasSuffix(suffix.lowercased()) {
+                if lowerName.hasSuffix(suffix.lowercased()) {
                     return true
                 }
             }
         }
-        
+
         return false
     }
 }

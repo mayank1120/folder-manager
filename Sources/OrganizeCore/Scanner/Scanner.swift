@@ -56,6 +56,8 @@ public actor Scanner {
         // Save scan record first (FK constraint requires it before inventory_items)
         try await inventoryStore.saveScan(scan)
         
+        let batchSize = 100
+
         // Process each source root
         for sourceRoot in project.sourceRoots where sourceRoot.isValid {
             // Save source root to DB (FK constraint requires it before inventory_items)
@@ -71,38 +73,43 @@ public actor Scanner {
             try await inventoryStore.saveScanSourceRoot(scanSourceRoot)
             scanSourceRoots.append(scanSourceRoot)
             
-            // Enumerate files synchronously (detectors instantiated locally for Swift 6 compliance)
-            let (items, excludedItems) = Self.enumerateSourceRoot(
+            var itemBatch: [InventoryItem] = []
+            var excludedBatch: [ExcludedItem] = []
+
+            for await event in Self.scanEvents(
                 sourceRoot: sourceRoot,
                 scanId: scanId,
                 projectMarkers: project.settings.projectMarkers
-            )
-            
-            allExcludedItems.append(contentsOf: excludedItems)
-            
-            // Save items in batches
-            var batch: [InventoryItem] = []
-            for scannedItem in items {
-                batch.append(scannedItem.item)
-                itemCount += 1
-                totalBytes += scannedItem.item.sizeBytes
-                progressHandler?(itemCount, scannedItem.relativePath)
-                
-                if batch.count >= 100 {
-                    try await inventoryStore.saveInventoryItems(batch)
-                    batch.removeAll(keepingCapacity: true)
+            ) {
+                switch event {
+                case .item(let scannedItem):
+                    itemBatch.append(scannedItem.item)
+                    itemCount += 1
+                    totalBytes += scannedItem.item.sizeBytes
+                    progressHandler?(itemCount, scannedItem.relativePath)
+
+                    if itemBatch.count >= batchSize {
+                        try await inventoryStore.saveInventoryItems(itemBatch)
+                        itemBatch.removeAll(keepingCapacity: true)
+                    }
+                case .excluded(let excludedItem):
+                    allExcludedItems.append(excludedItem)
+                    excludedBatch.append(excludedItem)
+
+                    if excludedBatch.count >= batchSize {
+                        try await inventoryStore.saveExcludedItems(excludedBatch)
+                        excludedBatch.removeAll(keepingCapacity: true)
+                    }
                 }
             }
-            
-            // Save remaining items
-            if !batch.isEmpty {
-                try await inventoryStore.saveInventoryItems(batch)
+
+            // Save remaining batches.
+            if !itemBatch.isEmpty {
+                try await inventoryStore.saveInventoryItems(itemBatch)
             }
-        }
-        
-        // Persist excluded items to DB for later CSV export
-        if !allExcludedItems.isEmpty {
-            try await inventoryStore.saveExcludedItems(allExcludedItems)
+            if !excludedBatch.isEmpty {
+                try await inventoryStore.saveExcludedItems(excludedBatch)
+            }
         }
         
         // Update scan with final counts
@@ -120,218 +127,228 @@ public actor Scanner {
         )
     }
     
-    /// Synchronous file enumeration (static to avoid actor isolation issues)
-    /// All detectors are instantiated locally per Swift 6 strict concurrency requirements
-    private static func enumerateSourceRoot(
+    private enum ScanEvent {
+        case item(ScannedItem)
+        case excluded(ExcludedItem)
+    }
+
+    /// Stream scan events from a synchronous enumerator to avoid async iterator warnings.
+    private static func scanEvents(
         sourceRoot: SourceRoot,
         scanId: EntityID,
         projectMarkers: [String]
-    ) -> (items: [ScannedItem], excluded: [ExcludedItem]) {
-        var items: [ScannedItem] = []
-        var excludedItems: [ExcludedItem] = []
-        
-        // Instantiate detectors locally (Swift 6 concurrency requirement)
-        let typeDetector = TypeDetector()
-        let packageDetector = PackageDetector()
-        let cloudStatusDetector = CloudStatusDetector()
-        let aliasDetector = AliasDetector()
-        let projectMarkerDetector = ProjectMarkerDetector(markers: projectMarkers)
-        let exifReader = EXIFReader()
-        
-        let sourceURL = URL(fileURLWithPath: sourceRoot.path).standardizedFileURL
+    ) -> AsyncStream<ScanEvent> {
+        AsyncStream { continuation in
+            let queue = DispatchQueue(label: "organize.scanner.enumeration")
 
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: sourceURL.path, isDirectory: &isDir), isDir.boolValue else {
-            return (items, excludedItems)
-        }
+            queue.async {
+                // Instantiate detectors locally (Swift 6 concurrency requirement)
+                let typeDetector = TypeDetector()
+                let packageDetector = PackageDetector()
+                let cloudStatusDetector = CloudStatusDetector()
+                let aliasDetector = AliasDetector()
+                let projectMarkerDetector = ProjectMarkerDetector(markers: projectMarkers)
+                let exifReader = EXIFReader()
 
-        // If the source root itself is a project/repo folder, exclude it and skip scanning its contents.
-        if projectMarkerDetector.containsProjectMarker(at: sourceURL) {
-            excludedItems.append(ExcludedItem(
-                scanId: scanId,
-                sourceRootId: sourceRoot.id,
-                relativePath: ".",
-                absolutePath: sourceURL.path,
-                reason: .projectFolder,
-                isDirectory: true
-            ))
-            return (items, excludedItems)
-        }
-        
-        guard let enumerator = FileManager.default.enumerator(
-            at: sourceURL,
-            includingPropertiesForKeys: [
-                .isRegularFileKey,
-                .isDirectoryKey,
-                .isPackageKey,
-                .isSymbolicLinkKey,
-                .isAliasFileKey,
-                .isHiddenKey,
-                .fileSizeKey,
-                .contentModificationDateKey,
-                .creationDateKey,
-                .contentTypeKey,
-                .ubiquitousItemDownloadingStatusKey
-            ],
-            options: []
-        ) else {
-            return (items, excludedItems)
-        }
-        
-        for case let fileURL as URL in enumerator {
-            let relativePath = Self.computeRelativePath(from: sourceURL, to: fileURL)
-            
-            // Check for symlink - skip descendants
-            if aliasDetector.isSymlink(at: fileURL) {
-                enumerator.skipDescendants()
-                excludedItems.append(ExcludedItem(
-                    scanId: scanId,
-                    sourceRootId: sourceRoot.id,
-                    relativePath: relativePath,
-                    absolutePath: fileURL.path,
-                    reason: .symlink,
-                    isDirectory: false
-                ))
-                continue
-            }
-            
-            // Check for Finder alias - files, so no skipDescendants needed
-            if aliasDetector.isFinderAlias(at: fileURL) {
-                excludedItems.append(ExcludedItem(
-                    scanId: scanId,
-                    sourceRootId: sourceRoot.id,
-                    relativePath: relativePath,
-                    absolutePath: fileURL.path,
-                    reason: .finderAlias,
-                    isDirectory: false
-                ))
-                continue
-            }
-            
-            // Get resource values
-            guard let resourceValues = try? fileURL.resourceValues(forKeys: [
-                .isRegularFileKey, .isDirectoryKey, .isPackageKey,
-                .isHiddenKey,
-                .fileSizeKey, .contentModificationDateKey, .creationDateKey
-            ]) else {
-                continue
-            }
-            
-            let isDirectory = resourceValues.isDirectory ?? false
-            let isPackage = (resourceValues.isPackage ?? false) || (isDirectory && packageDetector.isKnownPackageExtension(at: fileURL))
+                let sourceURL = URL(fileURLWithPath: sourceRoot.path).standardizedFileURL
 
-            // Hidden items: exclude and skip descendants for directories.
-            let isHidden = (resourceValues.isHidden ?? false) || fileURL.lastPathComponent.hasPrefix(".")
-            if isHidden {
-                if isDirectory {
-                    enumerator.skipDescendants()
+                var isDir: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: sourceURL.path, isDirectory: &isDir), isDir.boolValue else {
+                    continuation.finish()
+                    return
                 }
-                excludedItems.append(ExcludedItem(
-                    scanId: scanId,
-                    sourceRootId: sourceRoot.id,
-                    relativePath: relativePath,
-                    absolutePath: fileURL.path,
-                    reason: .hiddenItem,
-                    isDirectory: isDirectory
-                ))
-                continue
-            }
-            
-            // Handle packages atomically
-            if isPackage {
-                enumerator.skipDescendants()
-                
-                // Check for excluded package types
-                let (isExcluded, reason) = packageDetector.isExcludedPackage(at: fileURL)
-                if isExcluded, let excludeReason = reason {
-                    excludedItems.append(ExcludedItem(
+
+                // If the source root itself is a project/repo folder, exclude it and skip scanning its contents.
+                if projectMarkerDetector.containsProjectMarker(at: sourceURL) {
+                    continuation.yield(.excluded(ExcludedItem(
                         scanId: scanId,
                         sourceRootId: sourceRoot.id,
-                        relativePath: relativePath,
-                        absolutePath: fileURL.path,
-                        reason: excludeReason,
-                        isDirectory: true
-                    ))
-                    continue
-                }
-                
-                // Compute package size
-                let packageSize = packageDetector.computePackageSize(at: fileURL)
-                
-                // Create inventory item for package
-                let itemId = generateItemId(scanId: scanId, sourceRootId: sourceRoot.id, relativePath: relativePath)
-                
-                let item = InventoryItem(
-                    id: itemId,
-                    scanId: scanId,
-                    sourceRootId: sourceRoot.id,
-                    relativePath: relativePath,
-                    isPackage: true,
-                    sizeBytes: packageSize,
-                    modifiedTime: resourceValues.contentModificationDate ?? Date(),
-                    createdTime: resourceValues.creationDate,
-                    isCloudOnly: cloudStatusDetector.isCloudOnly(at: fileURL),
-                    uttypeIdentifier: typeDetector.detectType(at: fileURL),
-                    extension: typeDetector.getExtension(at: fileURL)
-                )
-                
-                items.append(ScannedItem(item: item, relativePath: relativePath))
-                continue
-            }
-            
-            // Skip plain directories (per spec: only files and packages)
-            if isDirectory {
-                // Check if it's a project folder
-                if projectMarkerDetector.containsProjectMarker(at: fileURL) {
-                    enumerator.skipDescendants()
-                    excludedItems.append(ExcludedItem(
-                        scanId: scanId,
-                        sourceRootId: sourceRoot.id,
-                        relativePath: relativePath,
-                        absolutePath: fileURL.path,
+                        relativePath: ".",
+                        absolutePath: sourceURL.path,
                         reason: .projectFolder,
                         isDirectory: true
-                    ))
+                    )))
+                    continuation.finish()
+                    return
                 }
-                continue
-            }
-            
-            // Handle regular files
-            let isRegularFile = resourceValues.isRegularFile ?? false
-            guard isRegularFile else { continue }
-            
-            let fileSize = Int64(resourceValues.fileSize ?? 0)
-            let itemId = generateItemId(scanId: scanId, sourceRootId: sourceRoot.id, relativePath: relativePath)
-            let uttypeIdentifier = typeDetector.detectType(at: fileURL)
-            let fileExtension = typeDetector.getExtension(at: fileURL)
-            let isCloudOnly = cloudStatusDetector.isCloudOnly(at: fileURL)
 
-            let exifDate: Date?
-            if !isCloudOnly && typeDetector.isImage(uttypeIdentifier: uttypeIdentifier) {
-                exifDate = exifReader.extractDateTimeOriginal(from: fileURL)
-            } else {
-                exifDate = nil
-            }
+                guard let enumerator = FileManager.default.enumerator(
+                    at: sourceURL,
+                    includingPropertiesForKeys: [
+                        .isRegularFileKey,
+                        .isDirectoryKey,
+                        .isPackageKey,
+                        .isSymbolicLinkKey,
+                        .isAliasFileKey,
+                        .isHiddenKey,
+                        .fileSizeKey,
+                        .contentModificationDateKey,
+                        .creationDateKey,
+                        .contentTypeKey,
+                        .ubiquitousItemDownloadingStatusKey
+                    ],
+                    options: []
+                ) else {
+                    continuation.finish()
+                    return
+                }
 
-            let item = InventoryItem(
-                id: itemId,
-                scanId: scanId,
-                sourceRootId: sourceRoot.id,
-                relativePath: relativePath,
-                isPackage: false,
-                sizeBytes: fileSize,
-                modifiedTime: resourceValues.contentModificationDate ?? Date(),
-                createdTime: resourceValues.creationDate,
-                exifDateTimeOriginal: exifDate,
-                isCloudOnly: isCloudOnly,
-                uttypeIdentifier: uttypeIdentifier,
-                extension: fileExtension
-            )
-            
-            items.append(ScannedItem(item: item, relativePath: relativePath))
+                for case let fileURL as URL in enumerator {
+                    let relativePath = Self.computeRelativePath(from: sourceURL, to: fileURL)
+
+                    // Check for symlink - skip descendants
+                    if aliasDetector.isSymlink(at: fileURL) {
+                        enumerator.skipDescendants()
+                        continuation.yield(.excluded(ExcludedItem(
+                            scanId: scanId,
+                            sourceRootId: sourceRoot.id,
+                            relativePath: relativePath,
+                            absolutePath: fileURL.path,
+                            reason: .symlink,
+                            isDirectory: false
+                        )))
+                        continue
+                    }
+
+                    // Check for Finder alias - files, so no skipDescendants needed
+                    if aliasDetector.isFinderAlias(at: fileURL) {
+                        continuation.yield(.excluded(ExcludedItem(
+                            scanId: scanId,
+                            sourceRootId: sourceRoot.id,
+                            relativePath: relativePath,
+                            absolutePath: fileURL.path,
+                            reason: .finderAlias,
+                            isDirectory: false
+                        )))
+                        continue
+                    }
+
+                    // Get resource values
+                    guard let resourceValues = try? fileURL.resourceValues(forKeys: [
+                        .isRegularFileKey, .isDirectoryKey, .isPackageKey,
+                        .isHiddenKey,
+                        .fileSizeKey, .contentModificationDateKey, .creationDateKey
+                    ]) else {
+                        continue
+                    }
+
+                    let isDirectory = resourceValues.isDirectory ?? false
+                    let isPackage = (resourceValues.isPackage ?? false) || (isDirectory && packageDetector.isKnownPackageExtension(at: fileURL))
+
+                    // Hidden items: exclude and skip descendants for directories.
+                    let isHidden = (resourceValues.isHidden ?? false) || fileURL.lastPathComponent.hasPrefix(".")
+                    if isHidden {
+                        if isDirectory {
+                            enumerator.skipDescendants()
+                        }
+                        continuation.yield(.excluded(ExcludedItem(
+                            scanId: scanId,
+                            sourceRootId: sourceRoot.id,
+                            relativePath: relativePath,
+                            absolutePath: fileURL.path,
+                            reason: .hiddenItem,
+                            isDirectory: isDirectory
+                        )))
+                        continue
+                    }
+
+                    // Handle packages atomically
+                    if isPackage {
+                        enumerator.skipDescendants()
+
+                        // Check for excluded package types
+                        let (isExcluded, reason) = packageDetector.isExcludedPackage(at: fileURL)
+                        if isExcluded, let excludeReason = reason {
+                            continuation.yield(.excluded(ExcludedItem(
+                                scanId: scanId,
+                                sourceRootId: sourceRoot.id,
+                                relativePath: relativePath,
+                                absolutePath: fileURL.path,
+                                reason: excludeReason,
+                                isDirectory: true
+                            )))
+                            continue
+                        }
+
+                        // Compute package size
+                        let packageSize = packageDetector.computePackageSize(at: fileURL)
+
+                        // Create inventory item for package
+                        let itemId = generateItemId(scanId: scanId, sourceRootId: sourceRoot.id, relativePath: relativePath)
+
+                        let item = InventoryItem(
+                            id: itemId,
+                            scanId: scanId,
+                            sourceRootId: sourceRoot.id,
+                            relativePath: relativePath,
+                            isPackage: true,
+                            sizeBytes: packageSize,
+                            modifiedTime: resourceValues.contentModificationDate ?? Date(),
+                            createdTime: resourceValues.creationDate,
+                            isCloudOnly: cloudStatusDetector.isCloudOnly(at: fileURL),
+                            uttypeIdentifier: typeDetector.detectType(at: fileURL),
+                            extension: typeDetector.getExtension(at: fileURL)
+                        )
+
+                        continuation.yield(.item(ScannedItem(item: item, relativePath: relativePath)))
+                        continue
+                    }
+
+                    // Skip plain directories (per spec: only files and packages)
+                    if isDirectory {
+                        // Check if it's a project folder
+                        if projectMarkerDetector.containsProjectMarker(at: fileURL) {
+                            enumerator.skipDescendants()
+                            continuation.yield(.excluded(ExcludedItem(
+                                scanId: scanId,
+                                sourceRootId: sourceRoot.id,
+                                relativePath: relativePath,
+                                absolutePath: fileURL.path,
+                                reason: .projectFolder,
+                                isDirectory: true
+                            )))
+                        }
+                        continue
+                    }
+
+                    // Handle regular files
+                    let isRegularFile = resourceValues.isRegularFile ?? false
+                    guard isRegularFile else { continue }
+
+                    let fileSize = Int64(resourceValues.fileSize ?? 0)
+                    let itemId = generateItemId(scanId: scanId, sourceRootId: sourceRoot.id, relativePath: relativePath)
+                    let uttypeIdentifier = typeDetector.detectType(at: fileURL)
+                    let fileExtension = typeDetector.getExtension(at: fileURL)
+                    let isCloudOnly = cloudStatusDetector.isCloudOnly(at: fileURL)
+
+                    let exifDate: Date?
+                    if !isCloudOnly && typeDetector.isImage(uttypeIdentifier: uttypeIdentifier) {
+                        exifDate = exifReader.extractDateTimeOriginal(from: fileURL)
+                    } else {
+                        exifDate = nil
+                    }
+
+                    let item = InventoryItem(
+                        id: itemId,
+                        scanId: scanId,
+                        sourceRootId: sourceRoot.id,
+                        relativePath: relativePath,
+                        isPackage: false,
+                        sizeBytes: fileSize,
+                        modifiedTime: resourceValues.contentModificationDate ?? Date(),
+                        createdTime: resourceValues.creationDate,
+                        exifDateTimeOriginal: exifDate,
+                        isCloudOnly: isCloudOnly,
+                        uttypeIdentifier: uttypeIdentifier,
+                        extension: fileExtension
+                    )
+
+                    continuation.yield(.item(ScannedItem(item: item, relativePath: relativePath)))
+                }
+
+                continuation.finish()
+            }
         }
-        
-        return (items, excludedItems)
     }
     
     /// Compute relative path safely using standardized URLs

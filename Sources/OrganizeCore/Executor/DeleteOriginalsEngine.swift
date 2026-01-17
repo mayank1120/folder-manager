@@ -160,6 +160,66 @@ public struct DeleteOriginalsEngine: Sendable {
                 continue
             }
 
+            // Pre-delete recheck: destination must still exist and match expected size.
+            let destURL = URL(fileURLWithPath: row.operation.resolvedDestPath)
+            guard FileManager.default.fileExists(atPath: destURL.path) else {
+                try await executionJournalStore.saveEntry(
+                    ExecutionJournalEntry(
+                        planId: planId,
+                        executionOpId: executionOpId,
+                        operationType: mode == .moveToTrash ? .trashOriginal : .archiveOriginal,
+                        sourceOperationId: operationId,
+                        currentState: .skipped,
+                        itemId: row.operation.itemId,
+                        sourcePath: sourceURL.path,
+                        destPath: destURL.path,
+                        error: "Destination missing before delete"
+                    )
+                )
+                skipped += 1
+                continue
+            }
+
+            if row.isPackage {
+                let destSize = packageDetector.computePackageSize(at: destURL)
+                if destSize != expectedStat.sizeBytes {
+                    try await executionJournalStore.saveEntry(
+                        ExecutionJournalEntry(
+                            planId: planId,
+                            executionOpId: executionOpId,
+                            operationType: mode == .moveToTrash ? .trashOriginal : .archiveOriginal,
+                            sourceOperationId: operationId,
+                            currentState: .skipped,
+                            itemId: row.operation.itemId,
+                            sourcePath: sourceURL.path,
+                            destPath: destURL.path,
+                            error: "Destination mismatch before delete: packageSize=\(destSize) (expected \(expectedStat.sizeBytes))"
+                        )
+                    )
+                    skipped += 1
+                    continue
+                }
+            } else {
+                let destSize = Self.fileSize(at: destURL)
+                if destSize != expectedStat.sizeBytes {
+                    try await executionJournalStore.saveEntry(
+                        ExecutionJournalEntry(
+                            planId: planId,
+                            executionOpId: executionOpId,
+                            operationType: mode == .moveToTrash ? .trashOriginal : .archiveOriginal,
+                            sourceOperationId: operationId,
+                            currentState: .skipped,
+                            itemId: row.operation.itemId,
+                            sourcePath: sourceURL.path,
+                            destPath: destURL.path,
+                            error: "Destination mismatch before delete: size=\(destSize) (expected \(expectedStat.sizeBytes))"
+                        )
+                    )
+                    skipped += 1
+                    continue
+                }
+            }
+
             // Pre-delete recheck: packages at least check logical size; files check size + mtime.
             if row.isPackage {
                 let currentSize = packageDetector.computePackageSize(at: sourceURL)

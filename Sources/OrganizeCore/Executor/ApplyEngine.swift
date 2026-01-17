@@ -740,14 +740,26 @@ public struct ApplyEngine: Sendable {
 
     private func isCrossDeviceMoveError(_ error: Error) -> Bool {
         let nsError = error as NSError
-        if nsError.domain == NSPOSIXErrorDomain && nsError.code == EXDEV {
+        return containsPOSIXEXDEV(nsError)
+    }
+
+    private func containsPOSIXEXDEV(_ error: NSError) -> Bool {
+        if error.domain == NSPOSIXErrorDomain && error.code == EXDEV {
             return true
         }
-        // Cocoa wrapper
-        if nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileWriteUnknownError {
-            // Some cases wrap EXDEV; fall back to false unless POSIX indicates.
-            return false
+
+        if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError {
+            if containsPOSIXEXDEV(underlying) {
+                return true
+            }
         }
+
+        if let underlyingErrors = error.userInfo[NSMultipleUnderlyingErrorsKey] as? [NSError] {
+            if underlyingErrors.contains(where: { containsPOSIXEXDEV($0) }) {
+                return true
+            }
+        }
+
         return false
     }
 
