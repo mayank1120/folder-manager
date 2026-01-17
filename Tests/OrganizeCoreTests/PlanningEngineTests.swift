@@ -59,6 +59,38 @@ final class OwnerMatcherTests: XCTestCase {
         XCTAssertEqual(result.reason, .singleMatch)
     }
 
+    func testOwnerMatcherPreservesOriginalTokenWhenCamelCaseSplitting() {
+        let people = [
+            Person(displayName: "John", keywordTokens: ["johndoe"])
+        ]
+
+        let matcher = OwnerMatcher(
+            people: people,
+            settings: OwnerMatchingSettings(enableCamelCaseSplit: true)
+        )
+        let result = matcher.match(path: "Docs/JohnDoe.pdf")
+
+        XCTAssertEqual(result.bucketName, "John")
+        XCTAssertEqual(result.confidence, .confident)
+        XCTAssertEqual(result.reason, .singleMatch)
+    }
+
+    func testOwnerMatcherPreservesOriginalTokenWhenDigitSplitting() {
+        let people = [
+            Person(displayName: "Camera", keywordTokens: ["img2024"])
+        ]
+
+        let matcher = OwnerMatcher(
+            people: people,
+            settings: OwnerMatchingSettings(enableCamelCaseSplit: false, enableDigitSplit: true)
+        )
+        let result = matcher.match(path: "Photos/IMG2024.jpg")
+
+        XCTAssertEqual(result.bucketName, "Camera")
+        XCTAssertEqual(result.confidence, .confident)
+        XCTAssertEqual(result.reason, .singleMatch)
+    }
+
     func testOwnerMatcherDecodingDoesNotBreakCaseInsensitiveMatch() throws {
         let json = """
         {

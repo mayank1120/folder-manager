@@ -84,17 +84,17 @@ public struct OwnerMatcher: Sendable {
         tokens.reserveCapacity(parts.count * 2)
 
         for part in parts {
-            var currentParts: [String] = [part]
+            var expanded: [String] = [part]
 
             if settings.enableCamelCaseSplit {
-                currentParts = currentParts.flatMap(splitCamelCase)
+                expanded.append(contentsOf: splitCamelCase(part))
             }
 
             if settings.enableDigitSplit {
-                currentParts = currentParts.flatMap(splitDigitBoundaries)
+                expanded.append(contentsOf: expanded.flatMap(splitDigitBoundaries))
             }
 
-            tokens.append(contentsOf: currentParts)
+            tokens.append(contentsOf: expanded)
         }
 
         return tokens
