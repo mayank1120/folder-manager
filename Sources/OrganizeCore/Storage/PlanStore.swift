@@ -33,8 +33,8 @@ public struct PlanStore: Sendable {
                         INSERT OR REPLACE INTO plan_items
                         (plan_id, item_id, disposition, owner_bucket, owner_reason, owner_confidence,
                          category, subcategory, base_dest_path, suggested_resolved_dest_path,
-                         reason_code, issue_type)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         reason_code, issue_type, matched_rule_id, classification_source)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                     arguments: [
                         item.planId.uuidString,
@@ -48,7 +48,9 @@ public struct PlanStore: Sendable {
                         item.baseDestPath,
                         item.suggestedResolvedDestPath,
                         item.reasonCode,
-                        item.issueType
+                        item.issueType,
+                        item.matchedRuleId,
+                        item.classificationSource?.rawValue
                     ]
                 )
             }
@@ -262,7 +264,9 @@ public struct PlanStore: Sendable {
                     baseDestPath: row["base_dest_path"] as String?,
                     suggestedResolvedDestPath: row["suggested_resolved_dest_path"] as String?,
                     reasonCode: row["reason_code"] as String?,
-                    issueType: row["issue_type"] as String?
+                    issueType: row["issue_type"] as String?,
+                    matchedRuleId: row["matched_rule_id"] as String?,
+                    classificationSource: (row["classification_source"] as String?).flatMap { ClassificationSource(rawValue: $0) }
                 )
                 
                 return PlanItemRow(

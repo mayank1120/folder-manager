@@ -17,13 +17,15 @@ public struct OwnerAssignment: Sendable, Hashable {
 
 public struct OwnerMatcher: Sendable {
     private let people: [Person]
+    private let settings: OwnerMatchingSettings
 
-    public init(people: [Person]) {
+    public init(people: [Person], settings: OwnerMatchingSettings = OwnerMatchingSettings()) {
         self.people = people
+        self.settings = settings
     }
 
     public func match(path: String) -> OwnerAssignment {
-        let tokens = tokenize(path)
+        let tokens = tokenize(path, settings: settings)
         let tokenSet = Set(tokens)
 
         var matches: [(person: Person, matchedTokens: [String])] = []
@@ -72,12 +74,100 @@ public struct OwnerMatcher: Sendable {
         )
     }
 
-    private func tokenize(_ input: String) -> [String] {
+    private func tokenize(_ input: String, settings: OwnerMatchingSettings) -> [String] {
         let separators = CharacterSet(charactersIn: " _-.,()[]/\\")
-        return input
-            .lowercased()
+        let parts = input
             .components(separatedBy: separators)
             .filter { !$0.isEmpty }
+
+        var tokens: [String] = []
+        tokens.reserveCapacity(parts.count * 2)
+
+        for part in parts {
+            var currentParts: [String] = [part]
+
+            if settings.enableCamelCaseSplit {
+                currentParts = currentParts.flatMap(splitCamelCase)
+            }
+
+            if settings.enableDigitSplit {
+                currentParts = currentParts.flatMap(splitDigitBoundaries)
+            }
+
+            tokens.append(contentsOf: currentParts)
+        }
+
+        return tokens
+            .map { $0.lowercased() }
+            .filter { !$0.isEmpty }
+    }
+
+    private func splitCamelCase(_ input: String) -> [String] {
+        if input.count < 2 {
+            return [input]
+        }
+
+        var tokens: [String] = []
+        var current = ""
+        let chars = Array(input)
+
+        for i in chars.indices {
+            let ch = chars[i]
+            let prev = i > 0 ? chars[i - 1] : nil
+            let next = (i + 1 < chars.count) ? chars[i + 1] : nil
+
+            if let prev, ch.isUppercase {
+                let prevIsLower = prev.isLowercase
+                let nextIsLower = next?.isLowercase ?? false
+                if prevIsLower || nextIsLower {
+                    if !current.isEmpty {
+                        tokens.append(current)
+                        current = ""
+                    }
+                }
+            }
+
+            current.append(ch)
+        }
+
+        if !current.isEmpty {
+            tokens.append(current)
+        }
+
+        return tokens
+    }
+
+    private func splitDigitBoundaries(_ input: String) -> [String] {
+        if input.count < 2 {
+            return [input]
+        }
+
+        var tokens: [String] = []
+        var current = ""
+        let chars = Array(input)
+
+        for i in chars.indices {
+            let ch = chars[i]
+            let prev = i > 0 ? chars[i - 1] : nil
+
+            if let prev {
+                let boundary = (prev.isNumber && !ch.isNumber) || (!prev.isNumber && ch.isNumber)
+                if boundary {
+                    if !current.isEmpty {
+                        tokens.append(current)
+                        current = ""
+                    }
+                }
+            }
+
+            current.append(ch)
+        }
+
+        if !current.isEmpty {
+            tokens.append(current)
+        }
+
+        return tokens
     }
 
     private func sanitizeFolderName(_ name: String) -> String {

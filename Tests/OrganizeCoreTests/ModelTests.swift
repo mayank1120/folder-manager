@@ -56,6 +56,10 @@ final class ProjectTests: XCTestCase {
         XCTAssertEqual(settings.collisionPolicy, .autoSuffix)
         XCTAssertEqual(settings.deleteOriginalsMode, .moveToTrash)
         XCTAssertFalse(settings.downloadBeforeProcessing)
+        XCTAssertTrue(settings.ownerMatching.enableCamelCaseSplit)
+        XCTAssertFalse(settings.ownerMatching.enableDigitSplit)
+        XCTAssertTrue(settings.extensionRules.isEmpty)
+        XCTAssertEqual(settings.extensionExclusions.excludeMode, .excludeOnlyThese)
     }
     
     func testSourceRootSlugGeneration() {

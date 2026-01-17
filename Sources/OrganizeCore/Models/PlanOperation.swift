@@ -58,6 +58,8 @@ public struct PlanItem: Codable, Sendable, Hashable {
     public let suggestedResolvedDestPath: String?
     public let reasonCode: String?
     public let issueType: String?
+    public let matchedRuleId: String?
+    public let classificationSource: ClassificationSource?
     
     public init(
         planId: EntityID,
@@ -71,7 +73,9 @@ public struct PlanItem: Codable, Sendable, Hashable {
         baseDestPath: String? = nil,
         suggestedResolvedDestPath: String? = nil,
         reasonCode: String? = nil,
-        issueType: String? = nil
+        issueType: String? = nil,
+        matchedRuleId: String? = nil,
+        classificationSource: ClassificationSource? = nil
     ) {
         self.planId = planId
         self.itemId = itemId
@@ -85,6 +89,8 @@ public struct PlanItem: Codable, Sendable, Hashable {
         self.suggestedResolvedDestPath = suggestedResolvedDestPath
         self.reasonCode = reasonCode
         self.issueType = issueType
+        self.matchedRuleId = matchedRuleId
+        self.classificationSource = classificationSource
     }
 }
 
