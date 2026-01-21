@@ -1,7 +1,11 @@
 import Foundation
 import CryptoKit
 
-/// Result of a scan operation
+/// Result of a scan operation.
+///
+/// A scan is read-only: it enumerates files under user-selected source roots and records an immutable
+/// inventory snapshot in SQLite. The result contains summary counts and any excluded items observed
+/// during enumeration.
 public struct ScanResult: Sendable {
     public let scan: Scan
     public let scanSourceRoots: [ScanSourceRoot]
@@ -31,14 +35,26 @@ public typealias ScanProgressHandler = @Sendable (Int, String) -> Void
 private struct ScannedItem: Sendable {
     let item: InventoryItem
     let relativePath: String
+    let inode: UInt64
 }
 
-/// Main scanner for traversing source roots
+/// Main scanner for traversing source roots and persisting an inventory snapshot.
+///
+/// The scanner never follows symlinks and treats certain macOS packages as atomic items.
+/// Excluded items are persisted to SQLite as they are encountered.
 public actor Scanner {
     private let inventoryStore: InventoryStore
+    private let snapshotStore: SnapshotStore?
+    private let configuration: ScannerConfiguration
     
-    public init(inventoryStore: InventoryStore) {
+    public init(
+        inventoryStore: InventoryStore,
+        snapshotStore: SnapshotStore? = nil,
+        configuration: ScannerConfiguration = .default
+    ) {
         self.inventoryStore = inventoryStore
+        self.snapshotStore = snapshotStore
+        self.configuration = configuration
     }
     
     /// Scan source roots and build inventory
@@ -56,7 +72,11 @@ public actor Scanner {
         // Save scan record first (FK constraint requires it before inventory_items)
         try await inventoryStore.saveScan(scan)
         
-        let batchSize = 100
+        let batchSize = configuration.batchSize
+        
+        // Load previous snapshots for incremental mode
+        let isIncremental = project.settings.incrementalScan.enabled && snapshotStore != nil
+        var newSnapshots: [FileSnapshot] = []
 
         // Process each source root
         for sourceRoot in project.sourceRoots where sourceRoot.isValid {
@@ -80,7 +100,8 @@ public actor Scanner {
                 sourceRoot: sourceRoot,
                 scanId: scanId,
                 projectMarkers: project.settings.projectMarkers,
-                duplicateDetection: project.settings.duplicateDetection
+                duplicateDetection: project.settings.duplicateDetection,
+                maxHashFileSizeBytes: configuration.maxHashFileSizeBytes
             ) {
                 switch event {
                 case .item(let scannedItem):
@@ -88,6 +109,18 @@ public actor Scanner {
                     itemCount += 1
                     totalBytes += scannedItem.item.sizeBytes
                     progressHandler?(itemCount, scannedItem.relativePath)
+                    
+                    // Create snapshot for incremental scan
+                    if isIncremental {
+                        newSnapshots.append(FileSnapshot(
+                            projectId: project.id,
+                            sourceRootId: sourceRoot.id,
+                            relativePath: scannedItem.relativePath,
+                            sizeBytes: scannedItem.item.sizeBytes,
+                            modifiedTime: scannedItem.item.modifiedTime,
+                            inode: scannedItem.inode
+                        ))
+                    }
 
                     if itemBatch.count >= batchSize {
                         try await inventoryStore.saveInventoryItems(itemBatch)
@@ -119,6 +152,11 @@ public actor Scanner {
         scan.totalBytes = totalBytes
         try await inventoryStore.saveScan(scan)  // Update with final counts
         
+        // Save snapshots for next incremental scan
+        if isIncremental, let store = snapshotStore, !newSnapshots.isEmpty {
+            try await store.saveSnapshots(newSnapshots)
+        }
+        
         return ScanResult(
             scan: scan,
             scanSourceRoots: scanSourceRoots,
@@ -138,12 +176,12 @@ public actor Scanner {
         sourceRoot: SourceRoot,
         scanId: EntityID,
         projectMarkers: [String],
-        duplicateDetection: DuplicateDetectionSettings
+        duplicateDetection: DuplicateDetectionSettings,
+        maxHashFileSizeBytes: Int64
     ) -> AsyncStream<ScanEvent> {
         AsyncStream { continuation in
-            let queue = DispatchQueue(label: "organize.scanner.enumeration")
-
-            queue.async {
+            let task = Task.detached(priority: .userInitiated) {
+                defer { continuation.finish() }
                 // Instantiate detectors locally (Swift 6 concurrency requirement)
                 let typeDetector = TypeDetector()
                 let packageDetector = PackageDetector()
@@ -157,7 +195,6 @@ public actor Scanner {
 
                 var isDir: ObjCBool = false
                 guard FileManager.default.fileExists(atPath: sourceURL.path, isDirectory: &isDir), isDir.boolValue else {
-                    continuation.finish()
                     return
                 }
 
@@ -171,7 +208,6 @@ public actor Scanner {
                         reason: .projectFolder,
                         isDirectory: true
                     )))
-                    continuation.finish()
                     return
                 }
 
@@ -192,15 +228,30 @@ public actor Scanner {
                     ],
                     options: []
                 ) else {
-                    continuation.finish()
                     return
                 }
 
-                for case let fileURL as URL in enumerator {
+                while let fileURL = enumerator.nextObject() as? URL {
+                    if Task.isCancelled {
+                        break
+                    }
+
                     let relativePath = Self.computeRelativePath(from: sourceURL, to: fileURL)
 
-                    // Check for symlink - skip descendants
-                    if aliasDetector.isSymlink(at: fileURL) {
+                    // PERF: Single resourceValues call with all needed keys
+                    // Avoids 2-3 extra stat() calls per file from separate symlink/alias checks
+                    guard let resourceValues = try? fileURL.resourceValues(forKeys: [
+                        .isSymbolicLinkKey, .isAliasFileKey,  // For symlink/alias exclusion
+                        .isRegularFileKey, .isDirectoryKey, .isPackageKey,
+                        .isHiddenKey,
+                        .fileSizeKey, .contentModificationDateKey, .creationDateKey,
+                        .fileResourceIdentifierKey  // For inode tracking in snapshots
+                    ]) else {
+                        continue
+                    }
+
+                    // Check symlink from unified values - skip descendants
+                    if resourceValues.isSymbolicLink == true {
                         enumerator.skipDescendants()
                         continuation.yield(.excluded(ExcludedItem(
                             scanId: scanId,
@@ -213,8 +264,8 @@ public actor Scanner {
                         continue
                     }
 
-                    // Check for Finder alias - files, so no skipDescendants needed
-                    if aliasDetector.isFinderAlias(at: fileURL) {
+                    // Check Finder alias from unified values
+                    if resourceValues.isAliasFile == true {
                         continuation.yield(.excluded(ExcludedItem(
                             scanId: scanId,
                             sourceRootId: sourceRoot.id,
@@ -223,15 +274,6 @@ public actor Scanner {
                             reason: .finderAlias,
                             isDirectory: false
                         )))
-                        continue
-                    }
-
-                    // Get resource values
-                    guard let resourceValues = try? fileURL.resourceValues(forKeys: [
-                        .isRegularFileKey, .isDirectoryKey, .isPackageKey,
-                        .isHiddenKey,
-                        .fileSizeKey, .contentModificationDateKey, .creationDateKey
-                    ]) else {
                         continue
                     }
 
@@ -294,7 +336,8 @@ public actor Scanner {
                             extension: typeDetector.getExtension(at: fileURL)
                         )
 
-                        continuation.yield(.item(ScannedItem(item: item, relativePath: relativePath)))
+                        let fileInode = resourceValues.fileResourceIdentifier.map { UInt64($0.hash) } ?? 0
+                        continuation.yield(.item(ScannedItem(item: item, relativePath: relativePath, inode: fileInode)))
                         continue
                     }
 
@@ -333,8 +376,8 @@ public actor Scanner {
                     }
 
                     let contentHash: String?
-                    if shouldHash && !isCloudOnly {
-                        contentHash = computeContentHash(for: fileURL)
+                    if shouldHash && !isCloudOnly && fileSize <= maxHashFileSizeBytes {
+                        contentHash = try? await computeContentHash(for: fileURL)
                     } else {
                         contentHash = nil
                     }
@@ -355,10 +398,12 @@ public actor Scanner {
                         extension: fileExtension
                     )
 
-                    continuation.yield(.item(ScannedItem(item: item, relativePath: relativePath)))
+                    continuation.yield(.item(ScannedItem(item: item, relativePath: relativePath, inode: UInt64(resourceValues.fileResourceIdentifier?.hash ?? 0))))
                 }
+            }
 
-                continuation.finish()
+            continuation.onTermination = { @Sendable _ in
+                task.cancel()
             }
         }
     }
@@ -385,19 +430,28 @@ public actor Scanner {
         return hash.prefix(16).map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func computeContentHash(for url: URL) -> String? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else {
-            return nil
-        }
+    private static func computeContentHash(for url: URL) async throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
 
         var hasher = SHA256()
+        var chunkCount = 0
+
         while true {
-            let data = try? handle.read(upToCount: 1_048_576)
+            try Task.checkCancellation()
+
+            let data = try handle.read(upToCount: 1_048_576)
             guard let chunk = data, !chunk.isEmpty else {
                 break
             }
+
             hasher.update(data: chunk)
+            chunkCount += 1
+
+            // Yield occasionally to keep cancellation responsive.
+            if chunkCount % 8 == 0 {
+                await Task.yield()
+            }
         }
 
         let digest = hasher.finalize()

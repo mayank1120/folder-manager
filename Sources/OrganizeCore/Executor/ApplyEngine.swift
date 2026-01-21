@@ -1,6 +1,7 @@
 import Foundation
 import Darwin
 
+/// Summary of an apply run.
 public struct ApplyResult: Sendable {
     public let planId: EntityID
     public let totalOperations: Int
@@ -72,6 +73,12 @@ public struct CloudDownloadHandler: Sendable {
     }
 }
 
+/// Applies a previously-generated plan to the filesystem.
+///
+/// Apply is deterministic and resumable:
+/// - Operations are executed in `sort_order`.
+/// - Every state transition is journaled (JSONL + SQLite index).
+/// - Unexpected collisions are skipped (never overwrite).
 public struct ApplyEngine: Sendable {
     private let dbManager: DatabaseManager
     private let planStore: PlanStore
@@ -88,6 +95,45 @@ public struct ApplyEngine: Sendable {
         self.journalStore = JournalStore(dbManager: dbManager)
         self.volumeDetector = VolumeDetector()
         self.cloudDownloadHandler = cloudDownloadHandler
+    }
+
+    /// Check if destination has sufficient disk space for the plan
+    /// - Parameters:
+    ///   - planId: The plan to check
+    ///   - destinationURL: The destination root URL
+    ///   - marginPercent: Safety margin (default 10%)
+    /// - Throws: ApplyError.insufficientDiskSpace if not enough space
+    public func preflightDiskCheck(
+        planId: EntityID,
+        destinationURL: URL,
+        marginPercent: Double = 0.10
+    ) async throws {
+        let rows = try await planStore.fetchPlanOperationExecutionRows(planId: planId)
+        
+        // Sum expected bytes for copy/move operations only
+        let totalBytes = rows.reduce(Int64(0)) { sum, row in
+            guard row.operation.operationType == .copyItem || row.operation.operationType == .moveItem else {
+                return sum
+            }
+            return sum + row.expectedSizeBytes
+        }
+        
+        // Add margin
+        let requiredBytes = Int64(Double(totalBytes) * (1.0 + marginPercent))
+        
+        // Get available space
+        let attributes = try FileManager.default.attributesOfFileSystem(forPath: destinationURL.path)
+        guard let availableBytes = attributes[.systemFreeSize] as? Int64 else {
+            return // Can't determine - skip check
+        }
+        
+        if requiredBytes > availableBytes {
+            throw ApplyError.insufficientDiskSpace(
+                requiredBytes: requiredBytes,
+                availableBytes: availableBytes,
+                destinationPath: destinationURL.path
+            )
+        }
     }
 
     public func apply(
@@ -112,7 +158,11 @@ public struct ApplyEngine: Sendable {
         let journalReader = JournalReader()
         let copyStatsByOperationId = (try? journalReader.copyStatsByOperationId(from: journalURL)) ?? [:]
         let journalWriter = try JournalWriter(planId: planId, journalFileURL: journalURL, journalStore: journalStore)
-        let normalizedTagNames = normalizeTagNames(project.settings.tagNames)
+        // Tags: prefer TagConfiguration, but keep legacy tagNames working for older projects/tests.
+        // Current Phase-3 behavior applies only global tags at apply time.
+        let tagConfig = project.settings.tagConfiguration
+        let effectiveGlobalTags = tagConfig.globalTags.isEmpty ? project.settings.tagNames : tagConfig.globalTags
+        let normalizedTagNames = normalizeTagNames(effectiveGlobalTags)
         let shouldApplyTags = project.settings.tagsEnabled && !normalizedTagNames.isEmpty
 
         var stateByOperationId: [String: JournalState] = [:]
@@ -192,6 +242,27 @@ public struct ApplyEngine: Sendable {
                         )
                         skipped += 1
                         continue
+                    }
+                    
+                    // Safety: Only apply tags if the linked file operation completed successfully
+                    if let linkedOpId = operation.linkedOperationId {
+                        let linkedState = stateByOperationId[linkedOpId]
+                        if linkedState?.currentState != .completed {
+                            try await journalWriter.append(
+                                JournalEntry(
+                                    planId: planId,
+                                    operationId: operation.operationId,
+                                    state: .skipped,
+                                    operationType: .applyTags,
+                                    itemId: operation.itemId,
+                                    resolvedDestPath: operation.resolvedDestPath,
+                                    error: "Linked file operation not completed (state: \(linkedState?.currentState.rawValue ?? "unknown"))",
+                                    reasonCode: ApplyReasonCode.linkedOpNotCompleted.rawValue
+                                )
+                            )
+                            skipped += 1
+                            continue
+                        }
                     }
 
                     guard FileManager.default.fileExists(atPath: destURL.path) else {
@@ -420,6 +491,15 @@ public struct ApplyEngine: Sendable {
                     break
                 }
 
+                // Update in-memory state so tag ops can see linked file op completed
+                if operation.operationType != .applyTags {
+                    stateByOperationId[operation.operationId] = JournalState(
+                        planId: planId,
+                        operationId: operation.operationId,
+                        currentState: .completed
+                    )
+                }
+                
                 completed += 1
             } catch {
                 let (reasonCode, shouldAbort) = mapApplyError(error)
@@ -867,8 +947,30 @@ public struct ApplyEngine: Sendable {
     }
 
     private func tempURLForDestination(destURL: URL, operationId: String) -> URL {
-        let dir = destURL.deletingLastPathComponent()
-        return dir.appendingPathComponent(".organize-temp-\(operationId)")
+        let fm = FileManager.default
+        let destDir = destURL.deletingLastPathComponent()
+        
+        // Prefer itemReplacementDirectory for same-volume atomic rename
+        // This ensures temp file is on same volume as destination
+        if let replacementDir = try? fm.url(
+            for: .itemReplacementDirectory,
+            in: .userDomainMask,
+            appropriateFor: destURL,
+            create: true
+        ) {
+            let ext = destURL.pathExtension
+            let tempName = ext.isEmpty ? operationId : "\(operationId).\(ext)"
+            return replacementDir.appendingPathComponent(tempName)
+        }
+        
+        // Fallback: Use destination directory with random hidden name
+        // This still enables atomic rename since it's same volume
+        let randomSuffix = UUID().uuidString.prefix(8)
+        let ext = destURL.pathExtension
+        let tempName = ext.isEmpty 
+            ? ".organize-\(randomSuffix)-\(operationId)"
+            : ".organize-\(randomSuffix)-\(operationId).\(ext)"
+        return destDir.appendingPathComponent(tempName)
     }
 
     private func fileStatForSource(
@@ -911,13 +1013,13 @@ public struct ApplyEngine: Sendable {
     }
 
     private func readTags(from url: URL) -> [String] {
-        let values = try? url.resourceValues(forKeys: [.tagNamesKey])
-        return values?.tagNames ?? []
+        // Delegate to TagHelper for consistency with rollback
+        TagHelper.readTags(from: url)
     }
 
     private func writeTags(_ tags: [String], to url: URL) throws {
-        let nsURL = url as NSURL
-        try nsURL.setResourceValue(tags, forKey: URLResourceKey.tagNamesKey)
+        // Delegate to TagHelper for consistency with rollback
+        try TagHelper.writeTags(tags, to: url)
     }
 
     private func toExecutionOpType(_ planType: PlanOperationType) -> ExecutionOperationType {
@@ -971,7 +1073,19 @@ public struct ApplyEngine: Sendable {
         return false
     }
 
-    public enum ApplyError: Error {
+    public enum ApplyError: Error, LocalizedError {
         case planNotFound(planId: EntityID)
+        case insufficientDiskSpace(requiredBytes: Int64, availableBytes: Int64, destinationPath: String)
+        
+        public var errorDescription: String? {
+            switch self {
+            case .planNotFound(let planId):
+                return "Plan not found: \(planId)"
+            case .insufficientDiskSpace(let required, let available, let path):
+                let requiredGB = Double(required) / 1_073_741_824
+                let availableGB = Double(available) / 1_073_741_824
+                return String(format: "Insufficient disk space at %@: need %.2f GB, only %.2f GB available", path, requiredGB, availableGB)
+            }
+        }
     }
 }

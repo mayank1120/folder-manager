@@ -29,3 +29,5 @@ xcuserdata/
 exports/
 journals/
 tmp-test/
+.tmp/
+docs/

@@ -26,6 +26,24 @@ public struct SettingsHasher: Sendable {
         components.append("pdfDateGrouping=\(settings.pdfDateGrouping.rawValue)")
 
         components.append("tagNames=\(normalizeList(settings.tagNames).joined(separator: ","))")
+        
+        // Include full TagConfiguration for determinism
+        let tagConfig = settings.tagConfiguration
+        components.append("tagConfig.globalTags=\(normalizeList(tagConfig.globalTags).joined(separator: ","))")
+        // Sort category/owner tags by key for determinism
+        let sortedCategoryKeys = tagConfig.categoryTags.keys.sorted()
+        for key in sortedCategoryKeys {
+            if let tags = tagConfig.categoryTags[key] {
+                components.append("tagConfig.categoryTags.\(key)=\(normalizeList(tags).joined(separator: ","))")
+            }
+        }
+        let sortedOwnerKeys = tagConfig.ownerTags.keys.sorted()
+        for key in sortedOwnerKeys {
+            if let tags = tagConfig.ownerTags[key] {
+                components.append("tagConfig.ownerTags.\(key)=\(normalizeList(tags).joined(separator: ","))")
+            }
+        }
+        
         components.append("screenshotPrefixes=\(normalizeList(settings.screenshotPrefixes).joined(separator: ","))")
         components.append("cameraPrefixes=\(normalizeList(settings.cameraPrefixes).joined(separator: ","))")
         components.append("projectMarkers=\(normalizeList(settings.projectMarkers).joined(separator: ","))")

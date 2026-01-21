@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 63;
+	objectVersion = 77;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -19,6 +19,7 @@
 		DAA766EF8C4A1C9F78B688C9 /* ProjectDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEC5286095D292452695849B /* ProjectDetailView.swift */; };
 		FA504C27A6416028D03E9AF6 /* Resources in Resources */ = {isa = PBXBuildFile; fileRef = 446A582D39BEE20820B1A9DD /* Resources */; };
 		FF5F092E56B75A155FBDD4C5 /* BookmarkManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37D968058219A86B9602760F /* BookmarkManager.swift */; };
+		EXPORT001A1B2C3D4E5F6G /* ExportHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = EXPORT002A1B2C3D4E5F6G /* ExportHelpers.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -26,7 +27,7 @@
 		37D968058219A86B9602760F /* BookmarkManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookmarkManager.swift; sourceTree = "<group>"; };
 		413EE2E3DC6170F58E1666DB /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		446A582D39BEE20820B1A9DD /* Resources */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Resources; path = OrganizeApp/Resources; sourceTree = SOURCE_ROOT; };
-		7CFB08D591A0B044151DB312 /* Organize.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Organize.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		7CFB08D591A0B044151DB312 /* OrganizeApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OrganizeApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		80FBD455EE98C7D08561FFE8 /* ProjectViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectViewModel.swift; sourceTree = "<group>"; };
 		8C03EDEFABF43905BBFFDB89 /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
 		A324D01F216D98A81564E071 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
@@ -35,6 +36,7 @@
 		C87775A20B165ABBE66F9767 /* PreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewView.swift; sourceTree = "<group>"; };
 		DB30B82CB20E014D288F536F /* ProjectSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectSetupView.swift; sourceTree = "<group>"; };
 		F375B81149CDEDAB1918C9B0 /* OrganizeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizeApp.swift; sourceTree = "<group>"; };
+		EXPORT002A1B2C3D4E5F6G /* ExportHelpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportHelpers.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -68,7 +70,7 @@
 		26555E41B920930CA508B4D7 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				7CFB08D591A0B044151DB312 /* Organize.app */,
+				7CFB08D591A0B044151DB312 /* OrganizeApp.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -134,6 +136,14 @@
 			path = Views;
 			sourceTree = "<group>";
 		};
+	EXPORT003A1B2C3D4E5F6G /* Utilities */ = {
+		isa = PBXGroup;
+		children = (
+			EXPORT002A1B2C3D4E5F6G /* ExportHelpers.swift */,
+		);
+		path = Utilities;
+		sourceTree = "<group>";
+	};
 		F4E3292BF21AC6364D788E6B /* OrganizeApp */ = {
 			isa = PBXGroup;
 			children = (
@@ -142,6 +152,7 @@
 				446A582D39BEE20820B1A9DD /* Resources */,
 				8ACD61B5DC494EB125FEBA7B /* Resources */,
 				26A517251BB22847A01AC88B /* Services */,
+				EXPORT003A1B2C3D4E5F6G /* Utilities */,
 				CFAC916F762A2E80779EFBDC /* ViewModels */,
 				ED55A031C9D7D10E662C60F3 /* Views */,
 			);
@@ -168,7 +179,7 @@
 				F07C748CA97499822902C675 /* OrganizeCore */,
 			);
 			productName = OrganizeApp;
-			productReference = 7CFB08D591A0B044151DB312 /* Organize.app */;
+			productReference = 7CFB08D591A0B044151DB312 /* OrganizeApp.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -198,6 +209,7 @@
 			packageReferences = (
 				96EEBFF4851B443E0BF1A10A /* XCLocalSwiftPackageReference ".." */,
 			);
+			preferredProjectObjectVersion = 77;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -232,6 +244,7 @@
 				724A0BB8DBFF17DDA1083A94 /* ProjectSetupView.swift in Sources */,
 				4300A334BBD98523A88195E6 /* ProjectViewModel.swift in Sources */,
 				03BA37E8302079A71BAABAB7 /* SidebarView.swift in Sources */,
+				EXPORT001A1B2C3D4E5F6G /* ExportHelpers.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -244,7 +257,6 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = OrganizeApp/OrganizeApp.entitlements;
 				COMBINE_HIDPI_IMAGES = YES;
-				DEVELOPMENT_TEAM = 63M8JBFP62;
 				INFOPLIST_FILE = OrganizeApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
 				PRODUCT_NAME = Organize;
@@ -387,7 +399,6 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = OrganizeApp/OrganizeApp.entitlements;
 				COMBINE_HIDPI_IMAGES = YES;
-				DEVELOPMENT_TEAM = 63M8JBFP62;
 				INFOPLIST_FILE = OrganizeApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
 				PRODUCT_NAME = Organize;

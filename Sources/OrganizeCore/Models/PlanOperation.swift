@@ -14,6 +14,8 @@ public struct PlanOperation: Codable, Sendable, Hashable {
     public let crossVolume: Bool
     public let reasonCode: String
     public let sortOrder: Int
+    /// For tag operations: the operationId of the file op this tag depends on
+    public let linkedOperationId: String?
     
     public init(
         operationId: String,
@@ -27,7 +29,8 @@ public struct PlanOperation: Codable, Sendable, Hashable {
         conflictToken: String? = nil,
         crossVolume: Bool = false,
         reasonCode: String,
-        sortOrder: Int
+        sortOrder: Int,
+        linkedOperationId: String? = nil
     ) {
         self.operationId = operationId
         self.planId = planId
@@ -41,6 +44,7 @@ public struct PlanOperation: Codable, Sendable, Hashable {
         self.crossVolume = crossVolume
         self.reasonCode = reasonCode
         self.sortOrder = sortOrder
+        self.linkedOperationId = linkedOperationId
     }
 }
 

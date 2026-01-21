@@ -2,6 +2,7 @@ import Foundation
 import CryptoKit
 import Darwin
 
+/// Summary of a plan build run.
 public struct PlanBuildSummary: Sendable {
     public let plan: Plan
     public let moveEligibleCount: Int
@@ -16,6 +17,13 @@ public struct PlanBuildSummary: Sendable {
     }
 }
 
+/// Builds a deterministic plan from an immutable scan snapshot.
+///
+/// Planning is a dry-run that produces:
+/// - `plan_items` (classification + disposition for every scanned item)
+/// - `plan_operations` (move-eligible operations only, sorted deterministically)
+///
+/// The planner is read-only to the destination filesystem (collision checks use `fileExists` only).
 public struct Planner: Sendable {
     private let inventoryStore: InventoryStore
     private let planStore: PlanStore
@@ -25,16 +33,20 @@ public struct Planner: Sendable {
         self.planStore = planStore
     }
 
-    public func createPlan(project: Project, scanId: EntityID) async throws -> PlanBuildSummary {
+    public func createPlan(
+        project: Project,
+        scanId: EntityID,
+        resolvedRuleDestinations: [EntityID: URL] = [:],
+        userOverrides: [String: UserOverride] = [:]
+    ) async throws -> PlanBuildSummary {
         guard let destinationRoot = project.destinationRoot?.path, project.destinationRoot?.isValid == true else {
             throw PlanningError.destinationRootMissing
         }
 
         try validateDestinationGuards(sourceRoots: project.sourceRoots, destinationRoot: destinationRoot)
 
-        let inventoryItems = try await inventoryStore.fetchInventoryItems(for: scanId)
-        let scanSourceRoots = try await inventoryStore.fetchScanSourceRoots(for: scanId)
-        let scanRootById = Dictionary(uniqueKeysWithValues: scanSourceRoots.map { ($0.sourceRootId, $0.pathAtScan) })
+        // Optimized: Single JOIN query instead of two separate fetches
+        let (inventoryItems, scanRootById) = try await inventoryStore.fetchInventoryItemsWithSourceRoots(for: scanId)
 
         let ownerMatcher = OwnerMatcher(people: project.people, settings: project.settings.ownerMatching)
         let typeClassifier = TypeClassifier(settings: project.settings)
@@ -59,9 +71,9 @@ public struct Planner: Sendable {
 
         let destRootURL = URL(fileURLWithPath: destinationRoot).standardizedFileURL
         let destDeviceId = Self.deviceId(path: destRootURL.path)
-        let sourceDeviceById: [EntityID: dev_t] = Dictionary(uniqueKeysWithValues: scanSourceRoots.compactMap { root in
-            guard let dev = Self.deviceId(path: root.pathAtScan) else { return nil }
-            return (root.sourceRootId, dev)
+        let sourceDeviceById: [EntityID: dev_t] = Dictionary(uniqueKeysWithValues: scanRootById.compactMap { (sourceRootId, pathAtScan) in
+            guard let dev = Self.deviceId(path: pathAtScan) else { return nil }
+            return (sourceRootId, dev)
         })
 
         struct WorkingItem {
@@ -89,7 +101,44 @@ public struct Planner: Sendable {
             }
             let sourcePathAtScan = (rootPathAtScan as NSString).appendingPathComponent(item.relativePath)
 
-            let owner = ownerMatcher.match(path: item.relativePath)
+            // Check for user override first
+            let override = userOverrides[item.id]
+            
+            // If user explicitly excluded, set disposition to excludedByPolicy
+            if override?.exclude == true {
+                working.append(WorkingItem(
+                    item: item,
+                    sourcePathAtScan: sourcePathAtScan,
+                    owner: ownerMatcher.match(path: item.relativePath),
+                    classification: nil,
+                    baseDestPath: nil,
+                    disposition: .excludedByPolicy,
+                    reasonCode: "userOverrideExclude",
+                    issueType: nil,
+                    resolvedDestPath: nil,
+                    collisionResolved: false,
+                    conflictToken: nil,
+                    matchedRuleId: nil,
+                    classificationSource: nil
+                ))
+                continue
+            }
+            
+            // Apply owner override if present
+            var owner = ownerMatcher.match(path: item.relativePath)
+            if let overrideBucket = override?.ownerBucket {
+                // Use .shared as the kind since user explicitly assigned to a named bucket
+                // This prevents the file from being treated as .unassigned (needs review)
+                owner = OwnerAssignment(
+                    bucketKind: .shared,  // Override means user explicitly assigned to a bucket
+                    bucketName: overrideBucket,
+                    reason: owner.reason,
+                    confidence: .confident,
+                    matchedPeople: owner.matchedPeople,
+                    matchedTokens: owner.matchedTokens
+                )
+            }
+            
             let policyExclude = dispositionEngine.policyExclusionReason(for: item)
 
             let ext = normalizeExtension(for: item)
@@ -126,7 +175,8 @@ public struct Planner: Sendable {
                         destinationRoot: destRootURL,
                         ownerBucketFolder: owner.bucketName,
                         rule: rule,
-                        item: item
+                        item: item,
+                        resolvedRuleDestinations: resolvedRuleDestinations
                     )
                 case .organizedRoot:
                     classification = typeClassifier.classify(item: item)
@@ -441,7 +491,11 @@ public struct Planner: Sendable {
 
         let fileOperations = planOperations
 
-        if project.settings.tagsEnabled && !project.settings.tagNames.isEmpty {
+        // Tags: plan tag operations if tags are enabled and there are effective global tags
+        // (TagConfiguration.globalTags preferred; fall back to legacy tagNames).
+        let tagConfig = project.settings.tagConfiguration
+        let effectiveGlobalTags = tagConfig.globalTags.isEmpty ? project.settings.tagNames : tagConfig.globalTags
+        if project.settings.tagsEnabled && !effectiveGlobalTags.isEmpty {
             let startIndex = planOperations.count
             planOperations.reserveCapacity(planOperations.count + fileOperations.count)
 
@@ -466,7 +520,8 @@ public struct Planner: Sendable {
                     conflictToken: nil,
                     crossVolume: false,
                     reasonCode: "",
-                    sortOrder: startIndex + offset
+                    sortOrder: startIndex + offset,
+                    linkedOperationId: op.operationId  // Link to the file operation
                 )
                 planOperations.append(tagOp)
             }
@@ -553,15 +608,27 @@ public struct Planner: Sendable {
         destinationRoot: URL,
         ownerBucketFolder: String,
         rule: ExtensionRule,
-        item: InventoryItem
+        item: InventoryItem,
+        resolvedRuleDestinations: [EntityID: URL]
     ) -> String? {
         guard let destPath = rule.destinationPath, !destPath.isEmpty else {
+            return nil
+        }
+        
+        // Security: Validate destination path doesn't contain traversal sequences
+        guard PathSecurity.isPathSafe(destPath) else {
+            // Log security violation and skip this rule
             return nil
         }
 
         let baseURL: URL
         if rule.destinationIsAbsolute {
-            baseURL = URL(fileURLWithPath: destPath).standardizedFileURL
+            // Use resolved bookmark URL if available, otherwise fall back to path
+            if let resolvedURL = resolvedRuleDestinations[rule.id] {
+                baseURL = resolvedURL.standardizedFileURL
+            } else {
+                baseURL = URL(fileURLWithPath: destPath).standardizedFileURL
+            }
         } else {
             baseURL = destinationRoot.appendingPathComponent(destPath).standardizedFileURL
         }
@@ -571,7 +638,9 @@ public struct Planner: Sendable {
             dir = dir.appendingPathComponent(ownerBucketFolder)
         }
 
-        let fileName = URL(fileURLWithPath: item.relativePath).lastPathComponent
+        // Security: Sanitize filename
+        let rawFileName = URL(fileURLWithPath: item.relativePath).lastPathComponent
+        let fileName = PathSecurity.sanitizeFilename(rawFileName)
         return dir.appendingPathComponent(fileName).path
     }
 

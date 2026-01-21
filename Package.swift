@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "Organize",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v14)
     ],
     products: [
         .library(

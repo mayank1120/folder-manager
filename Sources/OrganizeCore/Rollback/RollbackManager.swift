@@ -68,6 +68,14 @@ public struct RollbackManager: Sendable {
                 .filter { $0.currentState == .completed }
                 .map { $0.operationId }
         )
+        
+        // Read tagsBefore from journal for proper tag rollback
+        guard let plan = try await planStore.fetchPlan(id: planId) else {
+            throw RollbackError.planNotFound(planId: planId)
+        }
+        let journalURL = projectDirectory.appendingPathComponent(plan.journalPath)
+        let journalReader = JournalReader()
+        let tagsBeforeMap = (try? journalReader.tagsBeforeByOperationId(from: journalURL)) ?? [:]
 
         // Fetch operation rows.
         let rows = try await planStore.fetchPlanOperationExecutionRows(planId: planId)
@@ -348,8 +356,65 @@ public struct RollbackManager: Sendable {
                 }
 
             case .applyTags:
-                // Tags rollback not implemented in Phase 4.
-                skipped += 1
+                // Rollback tags: restore to tagsBefore state
+                let rollbackOpId = "\(op.operationId)-rollback"
+                
+                guard FileManager.default.fileExists(atPath: destURL.path) else {
+                    try await executionJournalStore.saveEntry(
+                        ExecutionJournalEntry(
+                            planId: planId,
+                            executionOpId: rollbackOpId,
+                            operationType: .rollbackTags,
+                            sourceOperationId: op.operationId,
+                            currentState: .skipped,
+                            itemId: op.itemId,
+                            destPath: destURL.path,
+                            error: "File not found for tag rollback"
+                        )
+                    )
+                    skipped += 1
+                    continue
+                }
+                
+                // Fetch the original tagsBefore from journal
+                // Only rollback if the tag operation completed
+                guard completedOpIds.contains(op.operationId) else {
+                    skipped += 1
+                    continue
+                }
+                
+                do {
+                    // Restore to prior tags from journal
+                    let tagsToRestore = tagsBeforeMap[op.operationId] ?? []
+                    try TagHelper.writeTags(tagsToRestore, to: destURL)
+                    
+                    try await executionJournalStore.saveEntry(
+                        ExecutionJournalEntry(
+                            planId: planId,
+                            executionOpId: rollbackOpId,
+                            operationType: .rollbackTags,
+                            sourceOperationId: op.operationId,
+                            currentState: .completed,
+                            itemId: op.itemId,
+                            destPath: destURL.path
+                        )
+                    )
+                    rolledBack += 1
+                } catch {
+                    try await executionJournalStore.saveEntry(
+                        ExecutionJournalEntry(
+                            planId: planId,
+                            executionOpId: rollbackOpId,
+                            operationType: .rollbackTags,
+                            sourceOperationId: op.operationId,
+                            currentState: .failed,
+                            itemId: op.itemId,
+                            destPath: destURL.path,
+                            error: String(describing: error)
+                        )
+                    )
+                    failed += 1
+                }
             }
         }
 

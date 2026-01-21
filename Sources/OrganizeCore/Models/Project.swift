@@ -59,7 +59,8 @@ public struct ProjectSettings: Codable, Sendable, Hashable {
     public var downloadBeforeProcessing: Bool
     public var enableOtherBucket: Bool
     public var tagsEnabled: Bool
-    public var tagNames: [String]
+    public var tagNames: [String]  // Legacy: global tags only
+    public var tagConfiguration: TagConfiguration  // New: supports per-category/owner tags
     public var screenshotPrefixes: [String]
     public var cameraPrefixes: [String]
     public var projectMarkers: [String]
@@ -70,6 +71,7 @@ public struct ProjectSettings: Codable, Sendable, Hashable {
     public var largeFileFilter: LargeFileFilterSettings
     public var pdfDateGrouping: PDFDateGrouping
     public var cleanupEmptyFolders: Bool
+    public var incrementalScan: IncrementalScanSettings
     
     public init(
         autoFileUnassigned: Bool = false,
@@ -81,6 +83,7 @@ public struct ProjectSettings: Codable, Sendable, Hashable {
         enableOtherBucket: Bool = false,
         tagsEnabled: Bool = false,
         tagNames: [String] = [],
+        tagConfiguration: TagConfiguration = TagConfiguration(),
         screenshotPrefixes: [String] = ["Screenshot", "Screen Shot"],
         cameraPrefixes: [String] = ["IMG_", "DSC_", "PXL_"],
         projectMarkers: [String] = [".git", ".svn", ".hg", "package.json", "Cargo.toml", "go.mod", "pyproject.toml", "requirements.txt", "Pipfile", "Podfile"],
@@ -90,7 +93,8 @@ public struct ProjectSettings: Codable, Sendable, Hashable {
         duplicateDetection: DuplicateDetectionSettings = DuplicateDetectionSettings(),
         largeFileFilter: LargeFileFilterSettings = LargeFileFilterSettings(),
         pdfDateGrouping: PDFDateGrouping = .year,
-        cleanupEmptyFolders: Bool = false
+        cleanupEmptyFolders: Bool = false,
+        incrementalScan: IncrementalScanSettings = IncrementalScanSettings()
     ) {
         self.autoFileUnassigned = autoFileUnassigned
         self.autoFileShared = autoFileShared
@@ -101,6 +105,7 @@ public struct ProjectSettings: Codable, Sendable, Hashable {
         self.enableOtherBucket = enableOtherBucket
         self.tagsEnabled = tagsEnabled
         self.tagNames = tagNames
+        self.tagConfiguration = tagConfiguration
         self.screenshotPrefixes = screenshotPrefixes
         self.cameraPrefixes = cameraPrefixes
         self.projectMarkers = projectMarkers
@@ -111,6 +116,7 @@ public struct ProjectSettings: Codable, Sendable, Hashable {
         self.largeFileFilter = largeFileFilter
         self.pdfDateGrouping = pdfDateGrouping
         self.cleanupEmptyFolders = cleanupEmptyFolders
+        self.incrementalScan = incrementalScan
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -123,6 +129,7 @@ public struct ProjectSettings: Codable, Sendable, Hashable {
         case enableOtherBucket
         case tagsEnabled
         case tagNames
+        case tagConfiguration
         case screenshotPrefixes
         case cameraPrefixes
         case projectMarkers
@@ -133,6 +140,7 @@ public struct ProjectSettings: Codable, Sendable, Hashable {
         case largeFileFilter
         case pdfDateGrouping
         case cleanupEmptyFolders
+        case incrementalScan
     }
 
     public init(from decoder: Decoder) throws {
@@ -147,6 +155,12 @@ public struct ProjectSettings: Codable, Sendable, Hashable {
         self.enableOtherBucket = try container.decodeIfPresent(Bool.self, forKey: .enableOtherBucket) ?? false
         self.tagsEnabled = try container.decodeIfPresent(Bool.self, forKey: .tagsEnabled) ?? false
         self.tagNames = try container.decodeIfPresent([String].self, forKey: .tagNames) ?? []
+        // Migration: if tagConfiguration missing but tagNames present, convert
+        if let config = try container.decodeIfPresent(TagConfiguration.self, forKey: .tagConfiguration) {
+            self.tagConfiguration = config
+        } else {
+            self.tagConfiguration = TagConfiguration.fromLegacyTags(self.tagNames)
+        }
         self.screenshotPrefixes = try container.decodeIfPresent([String].self, forKey: .screenshotPrefixes) ?? ["Screenshot", "Screen Shot"]
         self.cameraPrefixes = try container.decodeIfPresent([String].self, forKey: .cameraPrefixes) ?? ["IMG_", "DSC_", "PXL_"]
         self.projectMarkers = try container.decodeIfPresent([String].self, forKey: .projectMarkers)
@@ -164,6 +178,8 @@ public struct ProjectSettings: Codable, Sendable, Hashable {
             ?? .year
         self.cleanupEmptyFolders = try container.decodeIfPresent(Bool.self, forKey: .cleanupEmptyFolders)
             ?? false
+        self.incrementalScan = try container.decodeIfPresent(IncrementalScanSettings.self, forKey: .incrementalScan)
+            ?? IncrementalScanSettings()
     }
 }
 

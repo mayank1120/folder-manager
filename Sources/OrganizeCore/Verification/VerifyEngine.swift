@@ -70,14 +70,20 @@ public struct VerificationResult: Sendable {
     }
 }
 
+/// Verifies that applied operations completed successfully.
+///
+/// Verification uses the journal as the source of truth for operation state, then validates
+/// that destination files exist and match expected logical sizes. For small regular files, it
+/// can optionally compute SHA-256 hashes to detect same-size corruption.
 public struct VerifyEngine: Sendable {
     private let planStore: PlanStore
     private let journalStore: JournalStore
-    private let hashThresholdBytes: Int64 = 5 * 1024 * 1024
+    private let configuration: VerifyConfiguration
 
-    public init(dbManager: DatabaseManager) {
+    public init(dbManager: DatabaseManager, configuration: VerifyConfiguration = .default) {
         self.planStore = PlanStore(dbManager: dbManager)
         self.journalStore = JournalStore(dbManager: dbManager)
+        self.configuration = configuration
     }
 
     public func verify(planId: EntityID) async throws -> VerificationResult {
@@ -171,7 +177,7 @@ public struct VerifyEngine: Sendable {
                 actualSize = Int64(size)
             }
 
-            if actualSize != row.expectedSizeBytes {
+            if configuration.verifySizes && actualSize != row.expectedSizeBytes {
                 failures.append(
                     VerificationFailure(
                         operationId: op.operationId,
@@ -186,12 +192,12 @@ public struct VerifyEngine: Sendable {
                 continue
             }
 
-            if !row.isPackage && row.expectedSizeBytes <= hashThresholdBytes {
+            if configuration.verifyHashes && !row.isPackage && row.expectedSizeBytes <= configuration.hashThresholdBytes {
                 let sourceURL = URL(fileURLWithPath: row.sourcePathAtScan)
                 if FileManager.default.fileExists(atPath: sourceURL.path) {
                     do {
-                        let sourceHash = try sha256Hex(for: sourceURL)
-                        let destHash = try sha256Hex(for: destURL)
+                        let sourceHash = try await sha256Hex(for: sourceURL)
+                        let destHash = try await sha256Hex(for: destURL)
                         if sourceHash != destHash {
                             failures.append(
                                 VerificationFailure(
@@ -289,17 +295,27 @@ public struct VerifyEngine: Sendable {
 
     // MARK: - Hashing
 
-    private func sha256Hex(for url: URL) throws -> String {
+    private func sha256Hex(for url: URL) async throws -> String {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
 
         var hasher = SHA256()
+        var chunkCount = 0
+
         while true {
-            let data = handle.readData(ofLength: 1024 * 1024)
-            if data.isEmpty {
+            try Task.checkCancellation()
+
+            let data = try handle.read(upToCount: 1_048_576)
+            guard let chunk = data, !chunk.isEmpty else {
                 break
             }
-            hasher.update(data: data)
+
+            hasher.update(data: chunk)
+            chunkCount += 1
+
+            if chunkCount % 8 == 0 {
+                await Task.yield()
+            }
         }
 
         let digest = hasher.finalize()

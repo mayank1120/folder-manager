@@ -1,5 +1,7 @@
 import SwiftUI
 import OrganizeCore
+import AppKit
+import UniformTypeIdentifiers
 
 struct ProjectDetailView: View {
     let project: Project
@@ -192,6 +194,22 @@ struct ProjectContentView: View {
             }
             .disabled(!canScan)
             
+            // Re-Plan button - allows planning from existing scan without rescanning
+            if viewModel.project.currentScanId != nil {
+                Button {
+                    Task {
+                        do {
+                            try await viewModel.generatePlan()
+                        } catch {
+                            viewModel.errorMessage = error.localizedDescription
+                        }
+                    }
+                } label: {
+                    Label("Re-Plan", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .help("Generate a new plan from the current scan without rescanning")
+            }
+            
         case .preview:
             Button {
                 Task {
@@ -243,10 +261,34 @@ struct ProjectContentView: View {
     private func handleBookmarkError(_ error: BookmarkError) {
         switch error {
         case .stale(let url):
+            // Try to identify which bookmark is stale by matching the URL path
+            let stalePath = url.path
+            
+            // Check if it's the destination
+            if viewModel.project.destinationRoot?.path == stalePath {
+                staleBookmarkAlert = StaleBookmarkInfo(
+                    sourceRootId: nil,
+                    isDestination: true,
+                    originalPath: stalePath
+                )
+                return
+            }
+            
+            // Check if it's a source root
+            if let sourceRoot = viewModel.project.sourceRoots.first(where: { $0.path == stalePath }) {
+                staleBookmarkAlert = StaleBookmarkInfo(
+                    sourceRootId: sourceRoot.id,
+                    isDestination: false,
+                    originalPath: stalePath
+                )
+                return
+            }
+            
+            // Fallback: can't identify which bookmark is stale
             staleBookmarkAlert = StaleBookmarkInfo(
                 sourceRootId: nil,
                 isDestination: false,
-                originalPath: url.path
+                originalPath: stalePath
             )
         default:
             viewModel.errorMessage = error.localizedDescription
@@ -440,6 +482,47 @@ struct CompleteView: View {
                 if result.passed {
                     Text("You can now delete the original files or rollback.")
                         .foregroundStyle(.secondary)
+                } else if !result.failures.isEmpty {
+                    // Show failure details
+                    DisclosureGroup("Failure Details (\(result.failures.count))") {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(Array(result.failures.enumerated()), id: \.offset) { _, failure in
+                                    HStack(alignment: .top) {
+                                        Image(systemName: issueIcon(for: failure.issue))
+                                            .foregroundStyle(.red)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(issueDescription(for: failure.issue))
+                                                .font(.caption.bold())
+                                            Text(failure.expectedPath)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(2)
+                                            if let detail = failure.detail {
+                                                Text(detail)
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+                                    }
+                                    .padding(.vertical, 4)
+                                    Divider()
+                                }
+                            }
+                        }
+                        .frame(maxHeight: 200)
+                    }
+                    .padding()
+                    .background(.background.secondary)
+                    .cornerRadius(8)
+                    
+                    // Export failures button
+                    Button {
+                        exportVerificationFailures(result.failures)
+                    } label: {
+                        Label("Export Failures CSV", systemImage: "square.and.arrow.up")
+                    }
+                    .help("Export verification failures to a CSV file")
                 }
             }
             
@@ -488,6 +571,53 @@ struct CompleteView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+    
+    // MARK: - Failure Detail Helpers
+    
+    private func issueIcon(for issue: VerificationIssue) -> String {
+        switch issue {
+        case .notCompleted: return "xmark.circle"
+        case .destinationMissing: return "doc.badge.xmark"
+        case .sizeMismatch: return "ruler"
+        case .hashMismatch: return "number.circle"
+        }
+    }
+    
+    private func issueDescription(for issue: VerificationIssue) -> String {
+        switch issue {
+        case .notCompleted: return "Not Completed"
+        case .destinationMissing: return "Destination Missing"
+        case .sizeMismatch: return "Size Mismatch"
+        case .hashMismatch: return "Hash Mismatch"
+        }
+    }
+    
+    private func exportVerificationFailures(_ failures: [VerificationFailure]) {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.commaSeparatedText]
+        panel.nameFieldStringValue = "verify_failures.csv"
+        panel.title = "Export Verification Failures"
+        
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            
+            var lines: [String] = []
+            lines.append("path,issue,expected_bytes,actual_bytes,detail")
+            
+            for failure in failures {
+                let escapedPath = failure.expectedPath.replacingOccurrences(of: "\"", with: "\"\"")
+                let actualSize = failure.actualSizeBytes.map { String($0) } ?? ""
+                let detailEscaped = (failure.detail ?? "").replacingOccurrences(of: "\"", with: "\"\"")
+                lines.append("\"\(escapedPath)\",\(failure.issue.rawValue),\(failure.expectedSizeBytes),\(actualSize),\"\(detailEscaped)\"")
+            }
+            
+            let content = lines.joined(separator: "\n")
+            try? content.write(to: url, atomically: true, encoding: .utf8)
+            
+            // Open the exported file
+            NSWorkspace.shared.open(url)
+        }
     }
 }
 

@@ -120,7 +120,7 @@ struct ProjectSetupView: View {
             Divider()
 
             // Extension Routing
-            ExtensionRoutingSection(viewModel: viewModel)
+            ExtensionRoutingSection(viewModel: viewModel, bookmarkManager: viewModel.bookmarkManager)
 
             Divider()
 
@@ -454,8 +454,13 @@ struct AddPersonSheet: View {
 
 struct ExtensionRoutingSection: View {
     @Bindable var viewModel: ProjectViewModel
+    let bookmarkManager: BookmarkManager
     @State private var selectedTemplate: TemplateSelection = .custom
     @State private var isApplyingTemplate = false
+    @State private var showSaveTemplateSheet = false
+    @State private var userTemplateName = ""
+    @State private var userTemplates: [UserTemplate] = []
+    @State private var selectedUserTemplate: UserTemplate?
 
     private enum TemplateSelection: String, CaseIterable, Identifiable {
         case custom
@@ -503,6 +508,48 @@ struct ExtensionRoutingSection: View {
                     isApplyingTemplate = false
                 }
             }
+            
+            // User templates section
+            HStack {
+                Menu {
+                    Button("Save Current as Template...") {
+                        showSaveTemplateSheet = true
+                    }
+                    Divider()
+                    if userTemplates.isEmpty {
+                        Text("No saved templates")
+                    } else {
+                        ForEach(userTemplates) { template in
+                            Button {
+                                applyUserTemplate(template)
+                            } label: {
+                                HStack {
+                                    Text(template.name)
+                                    Spacer()
+                                    if selectedUserTemplate?.id == template.id {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                        Divider()
+                        Menu("Delete Template") {
+                            ForEach(userTemplates) { template in
+                                Button(template.name, role: .destructive) {
+                                    deleteUserTemplate(template)
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    Label("My Templates", systemImage: "square.and.arrow.down")
+                }
+                .menuStyle(.borderlessButton)
+            }
+            .onAppear { loadUserTemplates() }
+            .sheet(isPresented: $showSaveTemplateSheet) {
+                saveTemplateSheet
+            }
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Exclusions")
@@ -545,7 +592,8 @@ struct ExtensionRoutingSection: View {
                     ExtensionRuleRow(
                         rule: $rule,
                         onRemove: { removeRule(rule.id) },
-                        markCustom: markCustom
+                        markCustom: markCustom,
+                        bookmarkManager: bookmarkManager
                     )
                 }
             }
@@ -608,12 +656,77 @@ struct ExtensionRoutingSection: View {
             selectedTemplate = .custom
         }
     }
+    
+    // MARK: - User Templates
+    
+    private var saveTemplateSheet: some View {
+        VStack(spacing: 16) {
+            Text("Save as Template")
+                .font(.headline)
+            
+            TextField("Template Name", text: $userTemplateName)
+                .textFieldStyle(.roundedBorder)
+            
+            HStack {
+                Button("Cancel") {
+                    showSaveTemplateSheet = false
+                    userTemplateName = ""
+                }
+                .keyboardShortcut(.cancelAction)
+                
+                Button("Save") {
+                    saveCurrentAsTemplate()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(userTemplateName.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding()
+        .frame(width: 300)
+    }
+    
+    private func loadUserTemplates() {
+        let manager = UserTemplateManager()
+        userTemplates = (try? manager.loadTemplates()) ?? []
+    }
+    
+    private func saveCurrentAsTemplate() {
+        let template = UserTemplate(
+            name: userTemplateName.trimmingCharacters(in: .whitespaces),
+            settings: viewModel.project.settings
+        )
+        let manager = UserTemplateManager()
+        _ = try? manager.saveTemplate(template)
+        loadUserTemplates()
+        showSaveTemplateSheet = false
+        userTemplateName = ""
+    }
+    
+    private func applyUserTemplate(_ template: UserTemplate) {
+        isApplyingTemplate = true
+        viewModel.project.settings = template.settings
+        selectedUserTemplate = template
+        selectedTemplate = .custom
+        DispatchQueue.main.async {
+            isApplyingTemplate = false
+        }
+    }
+    
+    private func deleteUserTemplate(_ template: UserTemplate) {
+        let manager = UserTemplateManager()
+        try? manager.deleteTemplate(template)
+        loadUserTemplates()
+        if selectedUserTemplate?.id == template.id {
+            selectedUserTemplate = nil
+        }
+    }
 }
 
 struct ExtensionRuleRow: View {
     @Binding var rule: ExtensionRule
     let onRemove: () -> Void
     let markCustom: () -> Void
+    let bookmarkManager: BookmarkManager
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -638,10 +751,41 @@ struct ExtensionRuleRow: View {
                 .pickerStyle(.segmented)
 
                 if rule.destinationType == .customFolder {
-                    TextField("Destination Path", text: destinationPathBinding)
-                        .textFieldStyle(.roundedBorder)
+                    if rule.destinationIsAbsolute {
+                        // For absolute paths: use folder picker for sandbox compliance
+                        Button {
+                            selectDestinationFolder()
+                        } label: {
+                            HStack {
+                                Text(rule.destinationPath ?? "Select Folder...")
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .foregroundStyle(rule.destinationPath == nil ? .secondary : .primary)
+                                Image(systemName: "folder")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        
+                        // Stale bookmark indicator (check via bookmark resolution)
+                        if let bookmarkData = rule.destinationBookmarkData,
+                           isBookmarkStale(bookmarkData) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                                .help("Folder not accessible - may need relink")
+                        }
+                    } else {
+                        // For relative paths: text field is fine
+                        TextField("Relative Destination Path", text: destinationPathBinding)
+                            .textFieldStyle(.roundedBorder)
+                    }
                     Toggle("Absolute", isOn: $rule.destinationIsAbsolute)
                         .toggleStyle(.switch)
+                        .onChange(of: rule.destinationIsAbsolute) { _, isAbsolute in
+                            if isAbsolute && rule.destinationBookmarkData == nil {
+                                // Clear path when switching to absolute without bookmark
+                                rule.destinationPath = nil
+                            }
+                        }
                 }
             }
 
@@ -665,6 +809,32 @@ struct ExtensionRuleRow: View {
             markCustom()
         }
     }
+    
+    private func selectDestinationFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Select Destination"
+        panel.message = "Choose a folder for files matching this rule"
+        
+        if let currentPath = rule.destinationPath {
+            panel.directoryURL = URL(fileURLWithPath: currentPath)
+        }
+        
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                let bookmarkData = try bookmarkManager.createBookmark(for: url)
+                rule.destinationPath = url.path
+                rule.destinationBookmarkData = bookmarkData
+            } catch {
+                // Fall back to path only (won't work in sandbox)
+                rule.destinationPath = url.path
+                rule.destinationBookmarkData = nil
+            }
+        }
+    }
 
     private var extensionsBinding: Binding<String> {
         Binding(
@@ -686,6 +856,16 @@ struct ExtensionRuleRow: View {
                 rule.destinationPath = trimmed.isEmpty ? nil : trimmed
             }
         )
+    }
+    
+    private func isBookmarkStale(_ bookmarkData: Data) -> Bool {
+        do {
+            let (_, isStale) = try bookmarkManager.resolveBookmark(bookmarkData)
+            return isStale
+        } catch {
+            // Can't resolve = stale
+            return true
+        }
     }
 }
 
@@ -718,7 +898,21 @@ struct FilterSettingsSection: View {
                 Text("Year").tag(PDFDateGrouping.year)
                 Text("Year + Month").tag(PDFDateGrouping.yearMonth)
             }
+            
+            Divider()
+            
+            Toggle("Incremental scan (faster rescans) [EXPERIMENTAL]", isOn: incrementalScanBinding)
+                .help("⚠️ EXPERIMENTAL: This feature is not yet fully implemented. Currently saves snapshots but still performs full scans.")
+                .disabled(true)  // Disable until fully implemented
+                .foregroundStyle(.secondary)
         }
+    }
+    
+    private var incrementalScanBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.project.settings.incrementalScan.enabled },
+            set: { viewModel.project.settings.incrementalScan.enabled = $0 }
+        )
     }
 
     private var duplicateEnabledBinding: Binding<Bool> {
@@ -963,6 +1157,8 @@ struct TagsSection: View {
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                     .filter { !$0.isEmpty }
                 viewModel.project.settings.tagNames = parsed
+                // Sync to tagConfiguration.globalTags for engine consistency
+                viewModel.project.settings.tagConfiguration.globalTags = parsed
             }
         )
     }

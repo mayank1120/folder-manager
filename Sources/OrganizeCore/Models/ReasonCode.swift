@@ -40,4 +40,5 @@ public enum ApplyReasonCode: String, Codable, Sendable {
     case downloadFailed = "DownloadFailed"
     case accessError = "AccessError"
     case diskFull = "DiskFull"
+    case linkedOpNotCompleted = "LinkedOpNotCompleted"
 }

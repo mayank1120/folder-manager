@@ -70,6 +70,7 @@ public struct JournalStore: Sendable {
                     SELECT operation_id, current_state, last_updated, temp_path, phase
                     FROM journal_state
                     WHERE plan_id = ?
+                    ORDER BY operation_id
                     """,
                 arguments: [planId.uuidString]
             )

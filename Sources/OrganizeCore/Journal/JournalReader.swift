@@ -58,4 +58,52 @@ public struct JournalReader: Sendable {
 
         return result
     }
+    
+    /// Returns a map of `operationId -> tagsBefore` for `applyTags` operations.
+    ///
+    /// Used by rollback to restore tags to their prior state.
+    public func tagsBeforeByOperationId(from journalFileURL: URL) throws -> [String: [String]] {
+        guard FileManager.default.fileExists(atPath: journalFileURL.path) else {
+            return [:]
+        }
+
+        let handle = try FileHandle(forReadingFrom: journalFileURL)
+        defer { try? handle.close() }
+
+        var result: [String: [String]] = [:]
+
+        var buffer = Data()
+        while let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty {
+            buffer.append(chunk)
+
+            while let newlineIndex = buffer.firstIndex(of: 0x0A) {
+                let lineData = buffer.subdata(in: 0..<newlineIndex)
+                buffer.removeSubrange(0...newlineIndex)
+
+                if lineData.isEmpty {
+                    continue
+                }
+
+                if let entry = try? decoder.decode(JournalEntry.self, from: lineData),
+                   entry.operationType == .applyTags,
+                   let tagsBefore = entry.tagsBefore,
+                   result[entry.operationId] == nil
+                {
+                    result[entry.operationId] = tagsBefore
+                }
+            }
+        }
+
+        if !buffer.isEmpty {
+            if let entry = try? decoder.decode(JournalEntry.self, from: buffer),
+               entry.operationType == .applyTags,
+               let tagsBefore = entry.tagsBefore,
+               result[entry.operationId] == nil
+            {
+                result[entry.operationId] = tagsBefore
+            }
+        }
+
+        return result
+    }
 }

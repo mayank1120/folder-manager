@@ -77,7 +77,6 @@ OrganizeApp/
 The app uses these entitlements:
 - `com.apple.security.app-sandbox` — App sandbox enabled
 - `com.apple.security.files.user-selected.read-write` — Read/write user-selected files
-- `com.apple.security.files.downloads.read-write` — Access Downloads folder
 - `com.apple.security.files.bookmarks.app-scope` — Persist security-scoped bookmarks
 
 ## Architecture

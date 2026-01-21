@@ -27,58 +27,61 @@ public struct PlanStore: Sendable {
                 ]
             )
 
+            let planItemStatement = try db.makeStatement(
+                sql: """
+                    INSERT OR REPLACE INTO plan_items
+                    (plan_id, item_id, disposition, owner_bucket, owner_reason, owner_confidence,
+                     category, subcategory, base_dest_path, suggested_resolved_dest_path,
+                     reason_code, issue_type, matched_rule_id, classification_source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """
+            )
+
             for item in items {
-                try db.execute(
-                    sql: """
-                        INSERT OR REPLACE INTO plan_items
-                        (plan_id, item_id, disposition, owner_bucket, owner_reason, owner_confidence,
-                         category, subcategory, base_dest_path, suggested_resolved_dest_path,
-                         reason_code, issue_type, matched_rule_id, classification_source)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                    arguments: [
-                        item.planId.uuidString,
-                        item.itemId,
-                        item.disposition.rawValue,
-                        item.ownerBucket,
-                        item.ownerReason,
-                        item.ownerConfidence?.rawValue,
-                        item.category,
-                        item.subcategory,
-                        item.baseDestPath,
-                        item.suggestedResolvedDestPath,
-                        item.reasonCode,
-                        item.issueType,
-                        item.matchedRuleId,
-                        item.classificationSource?.rawValue
-                    ]
-                )
+                try planItemStatement.execute(arguments: [
+                    item.planId.uuidString,
+                    item.itemId,
+                    item.disposition.rawValue,
+                    item.ownerBucket,
+                    item.ownerReason,
+                    item.ownerConfidence?.rawValue,
+                    item.category,
+                    item.subcategory,
+                    item.baseDestPath,
+                    item.suggestedResolvedDestPath,
+                    item.reasonCode,
+                    item.issueType,
+                    item.matchedRuleId,
+                    item.classificationSource?.rawValue
+                ])
             }
 
+            let planOperationStatement = try db.makeStatement(
+                sql: """
+                    INSERT OR REPLACE INTO plan_operations
+                    (plan_id, operation_id, item_id, operation_type, execution_mode,
+                     base_dest_path, resolved_dest_path, collision_resolved, conflict_token,
+                     cross_volume, reason_code, sort_order, linked_operation_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """
+            )
+
             for op in operations {
-                try db.execute(
-                    sql: """
-                        INSERT OR REPLACE INTO plan_operations
-                        (plan_id, operation_id, item_id, operation_type, execution_mode,
-                         base_dest_path, resolved_dest_path, collision_resolved, conflict_token,
-                         cross_volume, reason_code, sort_order)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                    arguments: [
-                        op.planId.uuidString,
-                        op.operationId,
-                        op.itemId,
-                        op.operationType.rawValue,
-                        op.executionMode.rawValue,
-                        op.baseDestPath,
-                        op.resolvedDestPath,
-                        op.collisionResolved ? 1 : 0,
-                        op.conflictToken,
-                        op.crossVolume ? 1 : 0,
-                        op.reasonCode,
-                        op.sortOrder
-                    ]
-                )
+                try planOperationStatement.execute(arguments: [
+                    op.planId.uuidString,
+                    op.operationId,
+                    op.itemId,
+                    op.operationType.rawValue,
+                    op.executionMode.rawValue,
+                    op.baseDestPath,
+                    op.resolvedDestPath,
+                    op.collisionResolved ? 1 : 0,
+                    op.conflictToken,
+                    op.crossVolume ? 1 : 0,
+                    op.reasonCode,
+                    op.sortOrder,
+                    op.linkedOperationId
+                ])
             }
         }
     }
@@ -115,6 +118,44 @@ public struct PlanStore: Sendable {
             )
         }
     }
+    
+    /// Fetch all plans for a project, ordered by creation date (newest first)
+    public func fetchPlanHistory(projectId: EntityID) async throws -> [Plan] {
+        try await dbManager.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT * FROM plans
+                    WHERE project_id = ?
+                    ORDER BY created_at DESC
+                    """,
+                arguments: [projectId.uuidString]
+            )
+            
+            return rows.compactMap { row -> Plan? in
+                guard let planIdStr = row["plan_id"] as String?,
+                      let planId = UUID(uuidString: planIdStr),
+                      let scanIdStr = row["scan_id"] as String?,
+                      let scanId = UUID(uuidString: scanIdStr),
+                      let createdAtEpoch = row["created_at"] as Int64?,
+                      let settingsHash = row["settings_hash"] as String?,
+                      let operationCount = row["operation_count"] as Int?,
+                      let journalPath = row["journal_path"] as String? else {
+                    return nil
+                }
+                
+                return Plan(
+                    id: planId,
+                    scanId: scanId,
+                    projectId: projectId,
+                    createdAt: Date(timeIntervalSince1970: TimeInterval(createdAtEpoch)),
+                    settingsHash: settingsHash,
+                    operationCount: operationCount,
+                    journalPath: journalPath
+                )
+            }
+        }
+    }
 
     // MARK: - Apply / Verify Queries
 
@@ -149,6 +190,7 @@ public struct PlanStore: Sendable {
                       o.cross_volume,
                       o.reason_code,
                       o.sort_order,
+                      o.linked_operation_id,
                       i.source_root_id,
                       i.relative_path,
                       i.is_package,
@@ -199,7 +241,8 @@ public struct PlanStore: Sendable {
                     conflictToken: row["conflict_token"],
                     crossVolume: (row["cross_volume"] as Int? ?? 0) == 1,
                     reasonCode: (row["reason_code"] as String?) ?? "",
-                    sortOrder: sortOrder
+                    sortOrder: sortOrder,
+                    linkedOperationId: row["linked_operation_id"]
                 )
 
                 return PlanOperationExecutionRow(

@@ -4,17 +4,65 @@ import UniformTypeIdentifiers
 /// Detects file types using UTType and extension fallback
 public struct TypeDetector: Sendable {
     
+    // PERF: Extension-first lookup for common file types
+    // Avoids costly UTType resolution for unambiguous extensions
+    private static let knownExtensionTypes: [String: String] = [
+        // Images
+        "jpg": "public.jpeg", "jpeg": "public.jpeg", "png": "public.png",
+        "gif": "com.compuserve.gif", "heic": "public.heic", "heif": "public.heif",
+        "webp": "org.webmproject.webp", "tiff": "public.tiff", "tif": "public.tiff",
+        "bmp": "com.microsoft.bmp", "ico": "com.microsoft.ico", "svg": "public.svg-image",
+        "raw": "public.camera-raw-image", "cr2": "com.canon.cr2-raw-image",
+        "nef": "com.nikon.nef-raw-image", "arw": "com.sony.arw-raw-image",
+        
+        // Documents
+        "pdf": "com.adobe.pdf",
+        "doc": "com.microsoft.word.doc", "docx": "org.openxmlformats.wordprocessingml.document",
+        "xls": "com.microsoft.excel.xls", "xlsx": "org.openxmlformats.spreadsheetml.sheet",
+        "ppt": "com.microsoft.powerpoint.ppt", "pptx": "org.openxmlformats.presentationml.presentation",
+        "txt": "public.plain-text", "rtf": "public.rtf", "csv": "public.comma-separated-values-text",
+        "md": "net.daringfireball.markdown", "json": "public.json", "xml": "public.xml",
+        
+        // Audio
+        "mp3": "public.mp3", "m4a": "public.mpeg-4-audio", "aac": "public.aac-audio",
+        "wav": "com.microsoft.waveform-audio", "flac": "org.xiph.flac", "aiff": "public.aiff-audio",
+        
+        // Video
+        "mp4": "public.mpeg-4", "mov": "com.apple.quicktime-movie", "avi": "public.avi",
+        "mkv": "io.matroska.mkv", "wmv": "com.microsoft.windows-media-wmv",
+        "m4v": "com.apple.m4v-video", "webm": "org.webmproject.webm",
+        
+        // Archives
+        "zip": "public.zip-archive", "tar": "public.tar-archive", "gz": "org.gnu.gnu-zip-archive",
+        "rar": "com.rarlab.rar-archive", "7z": "org.7-zip.7-zip-archive", "dmg": "com.apple.disk-image",
+        
+        // Code/Dev
+        "swift": "public.swift-source", "py": "public.python-script", "js": "com.netscape.javascript-source",
+        "ts": "public.source-code", "html": "public.html", "css": "public.css",
+        "java": "com.sun.java-source", "c": "public.c-source", "cpp": "public.c-plus-plus-source",
+        "h": "public.c-header", "m": "public.objective-c-source", "rb": "public.ruby-script",
+        "go": "public.source-code", "rs": "public.source-code", "sh": "public.shell-script"
+    ]
+    
     public init() {}
     
     /// Detect UTType identifier for a file
+    /// Uses extension-first fast path for common types to avoid costly UTType resolution
     public func detectType(at url: URL) -> String? {
+        let ext = url.pathExtension.lowercased()
+        
+        // PERF: Fast path for common extensions
+        if let knownType = Self.knownExtensionTypes[ext] {
+            return knownType
+        }
+        
+        // Fall back to UTType for uncommon/ambiguous extensions
         if let uttype = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType {
             return uttype.identifier
         }
         
-        // Fallback to extension
-        let ext = url.pathExtension.lowercased()
-        if let uttype = UTType(filenameExtension: ext) {
+        // Last resort: UTType from extension
+        if !ext.isEmpty, let uttype = UTType(filenameExtension: ext) {
             return uttype.identifier
         }
         

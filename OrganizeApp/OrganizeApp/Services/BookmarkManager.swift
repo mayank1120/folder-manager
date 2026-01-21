@@ -47,6 +47,44 @@ final class BookmarkManager: Sendable {
     func refreshBookmark(oldData: Data, newURL: URL) throws -> Data {
         return try createBookmark(for: newURL)
     }
+    
+    /// Resolve bookmark and enforce freshness - throws if stale and can't auto-refresh
+    /// - Parameters:
+    ///   - data: The bookmark data to resolve
+    ///   - autoRefresh: If true, attempts to refresh stale bookmarks automatically
+    ///   - refreshHandler: Called when bookmark was refreshed, provides new bookmark data to persist
+    /// - Returns: The resolved URL (guaranteed fresh)
+    /// - Throws: BookmarkError.stale if bookmark is stale and autoRefresh is false
+    func resolveFreshBookmark(
+        _ data: Data,
+        autoRefresh: Bool = true,
+        refreshHandler: ((Data) -> Void)? = nil
+    ) throws -> URL {
+        let (url, isStale) = try resolveBookmark(data)
+        
+        if isStale {
+            if autoRefresh {
+                // Try to refresh the bookmark
+                let newData = try refreshBookmark(oldData: data, newURL: url)
+                refreshHandler?(newData)
+                return url
+            } else {
+                throw BookmarkError.stale(url: url)
+            }
+        }
+        
+        return url
+    }
+    
+    /// Resolve bookmark, requiring it to be fresh (no auto-refresh)
+    /// Use this when you need strict staleness checking
+    func resolveRequireFresh(_ data: Data) throws -> URL {
+        let (url, isStale) = try resolveBookmark(data)
+        if isStale {
+            throw BookmarkError.stale(url: url)
+        }
+        return url
+    }
 }
 
 enum BookmarkError: Error, LocalizedError {
