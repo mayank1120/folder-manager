@@ -168,7 +168,7 @@ public struct SnapshotStore: Sendable {
         }
         
         // Check for deleted files
-        for (snapshotId, snapshot) in previousSnapshots {
+        for (_, snapshot) in previousSnapshots {
             if snapshot.sourceRootId == sourceRootId && !seenPaths.contains(snapshot.relativePath) {
                 results.append(FileChangeResult(
                     relativePath: snapshot.relativePath,

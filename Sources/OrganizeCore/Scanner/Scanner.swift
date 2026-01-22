@@ -186,7 +186,6 @@ public actor Scanner {
                 let typeDetector = TypeDetector()
                 let packageDetector = PackageDetector()
                 let cloudStatusDetector = CloudStatusDetector()
-                let aliasDetector = AliasDetector()
                 let projectMarkerDetector = ProjectMarkerDetector(markers: projectMarkers)
                 let exifReader = EXIFReader()
                 let shouldHash = duplicateDetection.enabled
