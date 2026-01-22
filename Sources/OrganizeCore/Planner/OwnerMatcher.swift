@@ -18,10 +18,16 @@ public struct OwnerAssignment: Sendable, Hashable {
 public struct OwnerMatcher: Sendable {
     private let people: [Person]
     private let settings: OwnerMatchingSettings
+    // Pre-computed normalized keywords for each person (hot-path optimization)
+    private let normalizedKeywords: [[String]]
 
     public init(people: [Person], settings: OwnerMatchingSettings = OwnerMatchingSettings()) {
         self.people = people
         self.settings = settings
+        // Pre-compute normalized keywords once during init instead of per-file
+        self.normalizedKeywords = people.map { person in
+            person.keywordTokens.map { $0.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) }
+        }
     }
 
     public func match(path: String) -> OwnerAssignment {
@@ -31,10 +37,9 @@ public struct OwnerMatcher: Sendable {
         var matches: [(person: Person, matchedTokens: [String])] = []
         matches.reserveCapacity(people.count)
 
-        for person in people {
-            let matched = person.keywordTokens
-                .map { $0.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { tokenSet.contains($0) }
+        for (index, person) in people.enumerated() {
+            // Use pre-computed normalized keywords
+            let matched = normalizedKeywords[index].filter { tokenSet.contains($0) }
             if !matched.isEmpty {
                 matches.append((person: person, matchedTokens: matched.sorted()))
             }

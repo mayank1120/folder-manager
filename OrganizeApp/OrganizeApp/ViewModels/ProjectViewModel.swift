@@ -2,6 +2,14 @@ import Foundation
 import SwiftUI
 import OrganizeCore
 
+/// Info about a stale extension-rule bookmark that needs relink
+struct StaleRuleBookmarkInfo: Identifiable {
+    let id = UUID()
+    let ruleId: EntityID
+    let ruleName: String
+    let originalPath: String
+}
+
 /// ViewModel for a single project's scan/plan/apply workflow.
 /// NOTE: Requires macOS 14+ for @Observable macro.
 @MainActor
@@ -21,6 +29,9 @@ final class ProjectViewModel {
     var operations: [PlanStore.PlanOperationExecutionRow] = []
     var needsReviewItems: [PlanStore.PlanItemRow] = []
     var excludedItems: [PlanStore.PlanItemRow] = []
+    var extensionReport: [PlanStore.ExtensionReportRow] = []
+    var scanExcludedItems: [ExcludedItem] = []
+    var duplicateGroups: [DuplicateGroup] = []
     
     // Apply state
     var applyProgress: ApplyProgress?
@@ -35,8 +46,17 @@ final class ProjectViewModel {
     // Rollback state
     var rollbackResult: RollbackResult?
     
+    // Stale bookmark tracking for extension rules (Phase 1.2)
+    var staleRuleBookmarks: [StaleRuleBookmarkInfo] = []
+    
+    // Plan history for switching between plans
+    var planHistory: [Plan] = []
+    
     private let appState: AppState
     private var dbManager: DatabaseManager?
+    
+    /// Public accessor for bookmark operations in UI
+    var bookmarkManager: BookmarkManager { appState.bookmarkManager }
     
     enum Phase: String, CaseIterable {
         case setup = "Setup"
@@ -98,6 +118,7 @@ final class ProjectViewModel {
                     needsReviewCount: 0,   // Will be populated from items
                     excludedByPolicyCount: 0       // Will be populated from items
                 )
+                extensionReport = try await planStore.fetchExtensionReport(scanId: plan.scanId)
             }
             
             // Load operations
@@ -107,11 +128,25 @@ final class ProjectViewModel {
             needsReviewItems = try await planStore.fetchPlanItemRows(planId: planId, disposition: .needsReview)
             excludedItems = try await planStore.fetchPlanItemRows(planId: planId, disposition: .excludedByPolicy)
             
+            // Load scan-excluded items
+            if let plan = try await planStore.fetchPlan(id: planId) {
+                let inventoryStore = InventoryStore(dbManager: dbManager)
+                scanExcludedItems = try await inventoryStore.fetchExcludedItems(for: plan.scanId)
+                
+                // Load duplicate groups if hash scan was enabled
+                if project.settings.duplicateDetection.enabled {
+                    duplicateGroups = try await inventoryStore.fetchDuplicateGroups(for: plan.scanId)
+                }
+            }
+            
             // Update summary counts based on actual loaded data
             if var summary = planSummary {
+                let fileOperationCount = operations.filter {
+                    $0.operation.operationType == .copyItem || $0.operation.operationType == .moveItem
+                }.count
                 planSummary = PlanBuildSummary(
                     plan: summary.plan,
-                    moveEligibleCount: operations.count,
+                    moveEligibleCount: fileOperationCount,
                     needsReviewCount: needsReviewItems.count,
                     excludedByPolicyCount: excludedItems.count
                 )
@@ -145,6 +180,10 @@ final class ProjectViewModel {
         project.people.removeAll { $0.id == id }
         try await appState.updateProject(project)
     }
+
+    func persistProject() async throws {
+        try await appState.updateProject(project)
+    }
     
     // MARK: - Scan
     
@@ -172,7 +211,8 @@ final class ProjectViewModel {
         
         do {
             let inventoryStore = InventoryStore(dbManager: dbManager)
-            let scanner = Scanner(inventoryStore: inventoryStore)
+            let snapshotStore = SnapshotStore(dbManager: dbManager)
+            let scanner = Scanner(inventoryStore: inventoryStore, snapshotStore: snapshotStore)
             
             // ScanProgressHandler signature: (Int, String) -> Void
             let result = try await scanner.scan(project: project) { [weak self] count, relativePath in
@@ -186,6 +226,15 @@ final class ProjectViewModel {
             
             lastScanResult = result
             project.currentScanId = result.scan.id
+            
+            // Load scan-excluded items for UI display
+            scanExcludedItems = try await inventoryStore.fetchExcludedItems(for: result.scan.id)
+            
+            // Load duplicate groups if hash scan was enabled
+            if project.settings.duplicateDetection.enabled {
+                duplicateGroups = try await inventoryStore.fetchDuplicateGroups(for: result.scan.id)
+            }
+            
             try await appState.updateProject(project)
             currentPhase = .planning
         } catch {
@@ -207,12 +256,19 @@ final class ProjectViewModel {
         
         defer { isProcessing = false }
         
-        // Setup scoped access for destination (for collision checks)
+        // Setup scoped access for destination + extension rule destinations (for collision checks)
+        var accessURLs: [URL] = []
         if let destURL = try appState.resolveDestinationURL(for: project) {
-            let scopedAccess = ScopedAccess(urls: [destURL], bookmarkManager: appState.bookmarkManager)
-            defer { scopedAccess.endAccess() }
-            if !scopedAccess.allAccessGranted {
-                throw BookmarkError.accessDenied(url: destURL)
+            accessURLs.append(destURL)
+        }
+        // Include extension rule custom destinations for accurate collision detection
+        accessURLs.append(contentsOf: resolveExtensionRuleDestinations())
+        
+        let scopedAccess = ScopedAccess(urls: accessURLs, bookmarkManager: appState.bookmarkManager)
+        defer { scopedAccess.endAccess() }
+        if !scopedAccess.allAccessGranted {
+            if let denied = scopedAccess.deniedURLs.first {
+                throw BookmarkError.accessDenied(url: denied)
             }
         }
         
@@ -221,8 +277,20 @@ final class ProjectViewModel {
             let planStore = PlanStore(dbManager: dbManager)
             let planner = Planner(inventoryStore: inventoryStore, planStore: planStore)
             
+            // Resolve extension rule bookmarks for absolute destinations
+            let resolvedRuleDestinations = resolveExtensionRuleDestinationsMap()
+            
+            // Load user overrides for per-file classification changes
+            let overrideStore = OverrideStore(dbManager: dbManager)
+            let userOverrides = try await overrideStore.fetchOverridesMap(for: project.id)
+            
             // Returns PlanBuildSummary
-            let summary = try await planner.createPlan(project: project, scanId: scanId)
+            let summary = try await planner.createPlan(
+                project: project,
+                scanId: scanId,
+                resolvedRuleDestinations: resolvedRuleDestinations,
+                userOverrides: userOverrides
+            )
             planSummary = summary
             project.currentPlanId = summary.plan.id
             try await appState.updateProject(project)
@@ -233,6 +301,7 @@ final class ProjectViewModel {
             // Load NeedsReview and Excluded items
             needsReviewItems = try await planStore.fetchPlanItemRows(planId: summary.plan.id, disposition: .needsReview)
             excludedItems = try await planStore.fetchPlanItemRows(planId: summary.plan.id, disposition: .excludedByPolicy)
+            extensionReport = try await planStore.fetchExtensionReport(scanId: summary.plan.scanId)
             
             currentPhase = .preview
         } catch {
@@ -263,6 +332,11 @@ final class ProjectViewModel {
         let destURL = try appState.resolveDestinationURL(for: project)
         var allURLs = sourceURLs
         if let destURL { allURLs.append(destURL) }
+        
+        // Add extension rule absolute destinations (for sandbox compliance)
+        let extensionRuleURLs = resolveExtensionRuleDestinations()
+        allURLs.append(contentsOf: extensionRuleURLs)
+        
         let scopedAccess = ScopedAccess(urls: allURLs, bookmarkManager: appState.bookmarkManager)
         defer { scopedAccess.endAccess() }
         if !scopedAccess.allAccessGranted {
@@ -274,6 +348,12 @@ final class ProjectViewModel {
         
         do {
             let engine = ApplyEngine(dbManager: dbManager)
+            
+            // Preflight disk space check (only for real applies, not dry runs)
+            if !dryRun, let destURL = destURL {
+                try await engine.preflightDiskCheck(planId: planId, destinationURL: destURL)
+            }
+            
             let result = try await engine.apply(
                 planId: planId,
                 project: project,
@@ -309,12 +389,18 @@ final class ProjectViewModel {
         
         defer { isProcessing = false }
         
-        // Setup scoped access for destination
+        // Setup scoped access for destination + per-rule destinations
+        var allURLs: [URL] = []
         if let destURL = try appState.resolveDestinationURL(for: project) {
-            let scopedAccess = ScopedAccess(urls: [destURL], bookmarkManager: appState.bookmarkManager)
-            defer { scopedAccess.endAccess() }
-            if !scopedAccess.allAccessGranted {
-                throw BookmarkError.accessDenied(url: destURL)
+            allURLs.append(destURL)
+        }
+        allURLs.append(contentsOf: resolveExtensionRuleDestinations())
+        
+        let scopedAccess = ScopedAccess(urls: allURLs, bookmarkManager: appState.bookmarkManager)
+        defer { scopedAccess.endAccess() }
+        if !scopedAccess.allAccessGranted {
+            if let denied = scopedAccess.deniedURLs.first {
+                throw BookmarkError.accessDenied(url: denied)
             }
         }
         
@@ -323,9 +409,8 @@ final class ProjectViewModel {
             let result = try await engine.verify(planId: planId)
             verificationResult = result
             
-            if result.passed {
-                currentPhase = .complete
-            }
+            // Always advance to complete phase to show results (pass or fail)
+            currentPhase = .complete
         } catch {
             errorMessage = "Verify failed: \(error.localizedDescription)"
             throw error
@@ -347,11 +432,12 @@ final class ProjectViewModel {
         
         defer { isProcessing = false }
         
-        // Setup scoped access for source and destination
+        // Setup scoped access for source, destination, and per-rule destinations
         let sourceURLs = try appState.resolveSourceRootURLs(for: project)
         let destURL = try appState.resolveDestinationURL(for: project)
         var allURLs = sourceURLs
         if let destURL { allURLs.append(destURL) }
+        allURLs.append(contentsOf: resolveExtensionRuleDestinations())
         let scopedAccess = ScopedAccess(urls: allURLs, bookmarkManager: appState.bookmarkManager)
         defer { scopedAccess.endAccess() }
         if !scopedAccess.allAccessGranted {
@@ -390,11 +476,12 @@ final class ProjectViewModel {
         
         defer { isProcessing = false }
         
-        // Setup scoped access for source and destination
+        // Setup scoped access for source, destination, and per-rule destinations
         let sourceURLs = try appState.resolveSourceRootURLs(for: project)
         let destURL = try appState.resolveDestinationURL(for: project)
         var allURLs = sourceURLs
         if let destURL { allURLs.append(destURL) }
+        allURLs.append(contentsOf: resolveExtensionRuleDestinations())
         let scopedAccess = ScopedAccess(urls: allURLs, bookmarkManager: appState.bookmarkManager)
         defer { scopedAccess.endAccess() }
         if !scopedAccess.allAccessGranted {
@@ -435,6 +522,48 @@ final class ProjectViewModel {
         } catch {
             errorMessage = "Failed to relink: \(error.localizedDescription)"
         }
+    }
+    
+    // MARK: - Export
+    
+    /// Export plan data to CSV files in the specified directory
+    /// Returns the paths to all exported files
+    func exportPlan(to directory: URL) async throws -> PlanExportPaths {
+        guard let dbManager else {
+            throw ProjectError.noDatabaseManager
+        }
+        guard let planId = project.currentPlanId else {
+            throw ProjectError.noPlan
+        }
+        
+        let exportManager = ExportManager(dbManager: dbManager)
+        return try await exportManager.exportPlan(planId: planId, to: directory)
+    }
+    
+    // MARK: - Plan History
+    
+    /// Load plan history for this project
+    func loadPlanHistory() async {
+        guard let dbManager else { return }
+        
+        let planStore = PlanStore(dbManager: dbManager)
+        do {
+            planHistory = try await planStore.fetchPlanHistory(projectId: project.id)
+        } catch {
+            errorMessage = "Failed to load plan history: \(error.localizedDescription)"
+        }
+    }
+    
+    /// Select a specific plan from history and load its data
+    func selectPlan(_ plan: Plan) async {
+        project.currentPlanId = plan.id
+        project.currentScanId = plan.scanId
+        
+        // Save project state
+        try? await saveProject()
+        
+        // Reload plan data
+        await loadExistingPlanData()
     }
 }
 
@@ -484,5 +613,107 @@ enum ProjectError: Error, LocalizedError {
         case .noProjectDirectory:
             return "Project directory not found"
         }
+    }
+}
+
+// MARK: - Extension Rule Bookmark Resolution
+
+extension ProjectViewModel {
+    /// Resolve all extension rule bookmarks to URLs for scoped access
+    func resolveExtensionRuleDestinations() -> [URL] {
+        var urls: [URL] = []
+        for rule in project.settings.extensionRules {
+            guard rule.enabled,
+                  rule.destinationType == .customFolder,
+                  rule.destinationIsAbsolute,
+                  let bookmarkData = rule.destinationBookmarkData else {
+                continue
+            }
+            do {
+                let (url, _) = try bookmarkManager.resolveBookmark(bookmarkData)
+                urls.append(url)
+            } catch {
+                // Stale or invalid bookmark - will fail at apply time
+            }
+        }
+        return urls
+    }
+    
+    /// Resolve extension rule bookmarks to a map from rule ID to URL (for Planner)
+    /// Enforces bookmark freshness - stale bookmarks are surfaced for relink
+    func resolveExtensionRuleDestinationsMap() -> [EntityID: URL] {
+        var map: [EntityID: URL] = [:]
+        for rule in project.settings.extensionRules {
+            guard rule.enabled,
+                  rule.destinationType == .customFolder,
+                  rule.destinationIsAbsolute,
+                  let bookmarkData = rule.destinationBookmarkData else {
+                continue
+            }
+            do {
+                // Enforce freshness - stale bookmarks must be relinked
+                let url = try bookmarkManager.resolveFreshBookmark(
+                    bookmarkData,
+                    autoRefresh: true,
+                    refreshHandler: { [weak self] newData in
+                        // Update the rule with refreshed bookmark
+                        self?.updateRuleBookmark(ruleId: rule.id, newBookmarkData: newData)
+                    }
+                )
+                map[rule.id] = url
+            } catch BookmarkError.stale(let url) {
+                // Surface stale bookmark with ruleId for proper relink UX
+                staleRuleBookmarks.append(StaleRuleBookmarkInfo(
+                    ruleId: rule.id,
+                    ruleName: rule.extensions.joined(separator: ", "),
+                    originalPath: url.path
+                ))
+            } catch {
+                // Other errors - skip, will use path fallback or fail at apply
+            }
+        }
+        return map
+    }
+    
+    /// Update extension rule bookmark data after refresh
+    private func updateRuleBookmark(ruleId: EntityID, newBookmarkData: Data) {
+        if let index = project.settings.extensionRules.firstIndex(where: { $0.id == ruleId }) {
+            project.settings.extensionRules[index].destinationBookmarkData = newBookmarkData
+            // Persist project changes
+            Task { try? await saveProject() }
+        }
+    }
+    
+    /// Persist project changes to disk via AppState
+    private func saveProject() async throws {
+        try await appState.updateProject(project)
+    }
+    
+    // MARK: - Duplicate Selection Actions
+    
+    /// Apply duplicate keeper selections by creating exclude overrides for non-keepers
+    func applyDuplicateSelections() async throws {
+        guard let dbManager else {
+            throw ProjectError.noDatabaseManager
+        }
+
+        let overrideStore = OverrideStore(dbManager: dbManager)
+        
+        for group in duplicateGroups {
+            guard let keeperId = group.selectedKeeperId else { continue }
+            
+            // For each non-keeper, create an exclude override
+            for item in group.items where item.itemId != keeperId {
+                let override = UserOverride(
+                    projectId: project.id,
+                    itemId: item.itemId,
+                    exclude: true
+                )
+                try await overrideStore.saveOverride(override)
+            }
+        }
+        
+        // Regenerate plan with overrides applied
+        try await generatePlan()
     }
 }

@@ -63,6 +63,7 @@ public actor DatabaseManager {
                 t.column("created_time", .integer)
                 t.column("exif_datetime_original", .integer)
                 t.column("is_cloud_only", .integer).notNull().defaults(to: 0)
+                t.column("content_hash", .text)
                 t.column("uttype_identifier", .text)
                 t.column("extension", .text)
                 t.foreignKey(["scan_id"], references: "scans", columns: ["scan_id"])
@@ -119,6 +120,7 @@ public actor DatabaseManager {
                 t.column("cross_volume", .integer).notNull().defaults(to: 0)
                 t.column("reason_code", .text)
                 t.column("sort_order", .integer).notNull()
+                t.column("linked_operation_id", .text)  // For tag ops: links to file op
                 t.primaryKey(["plan_id", "operation_id"])
                 t.foreignKey(["plan_id"], references: "plans", columns: ["plan_id"])
                 t.foreignKey(["item_id"], references: "inventory_items", columns: ["item_id"])
@@ -154,6 +156,36 @@ public actor DatabaseManager {
             // Migrate execution_journal if columns are missing
             try Self.ensureExecutionJournalColumns(db: db)
             try Self.ensurePlanItemsColumns(db: db)
+            try Self.ensureInventoryItemColumns(db: db)
+            try Self.ensurePlanOperationsColumns(db: db)
+            
+            // User overrides table (for per-file classification overrides)
+            try db.create(table: "user_overrides", ifNotExists: true) { t in
+                t.column("override_id", .text).primaryKey()
+                t.column("project_id", .text).notNull()
+                t.column("item_id", .text).notNull()
+                t.column("owner_bucket", .text)
+                t.column("category", .text)
+                t.column("subcategory", .text)
+                t.column("extension_rule_id", .text)
+                t.column("exclude", .integer).notNull().defaults(to: 0)
+                t.column("created_at", .integer).notNull()
+                t.column("updated_at", .integer).notNull()
+                t.uniqueKey(["project_id", "item_id"])
+            }
+            
+            // File snapshots table (for incremental scans)
+            try db.create(table: "file_snapshots", ifNotExists: true) { t in
+                t.column("snapshot_id", .text).primaryKey()
+                t.column("project_id", .text).notNull()
+                t.column("source_root_id", .text).notNull()
+                t.column("relative_path", .text).notNull()
+                t.column("size_bytes", .integer).notNull()
+                t.column("modified_time", .integer).notNull()
+                t.column("inode", .integer).notNull()
+                t.column("snapshot_date", .integer).notNull()
+                t.uniqueKey(["project_id", "source_root_id", "relative_path"])
+            }
             
             // Indexes
             try db.create(index: "idx_inventory_scan", on: "inventory_items", columns: ["scan_id"], ifNotExists: true)
@@ -164,6 +196,16 @@ public actor DatabaseManager {
             try db.create(index: "idx_plan_ops_order", on: "plan_operations", columns: ["plan_id", "sort_order"], ifNotExists: true)
             try db.create(index: "idx_journal_plan", on: "journal_state", columns: ["plan_id"], ifNotExists: true)
             try db.create(index: "idx_exec_journal_plan", on: "execution_journal", columns: ["plan_id"], ifNotExists: true)
+            try db.create(index: "idx_overrides_project", on: "user_overrides", columns: ["project_id"], ifNotExists: true)
+            try db.create(index: "idx_snapshots_project", on: "file_snapshots", columns: ["project_id"], ifNotExists: true)
+            
+            // PERF: Composite indexes for common query patterns
+            // Inventory queries often ORDER BY source_root_id + relative_path
+            try db.create(index: "idx_inventory_scan_root_path", on: "inventory_items", columns: ["scan_id", "source_root_id", "relative_path"], ifNotExists: true)
+            // Plan item queries filter by disposition
+            try db.create(index: "idx_plan_items_disposition", on: "plan_items", columns: ["plan_id", "disposition"], ifNotExists: true)
+            // Content hash lookups for duplicate detection
+            try db.create(index: "idx_inventory_content_hash", on: "inventory_items", columns: ["scan_id", "content_hash"], ifNotExists: true)
         }
     }
 
@@ -255,6 +297,24 @@ public actor DatabaseManager {
         }
         if !existingColumns.contains("classification_source") {
             try db.execute(sql: "ALTER TABLE plan_items ADD COLUMN classification_source TEXT")
+        }
+    }
+
+    private static func ensureInventoryItemColumns(db: Database) throws {
+        let rows = try Row.fetchAll(db, sql: "PRAGMA table_info(inventory_items)")
+        let existingColumns = Set(rows.compactMap { $0["name"] as String? })
+
+        if !existingColumns.contains("content_hash") {
+            try db.execute(sql: "ALTER TABLE inventory_items ADD COLUMN content_hash TEXT")
+        }
+    }
+
+    private static func ensurePlanOperationsColumns(db: Database) throws {
+        let rows = try Row.fetchAll(db, sql: "PRAGMA table_info(plan_operations)")
+        let existingColumns = Set(rows.compactMap { $0["name"] as String? })
+
+        if !existingColumns.contains("linked_operation_id") {
+            try db.execute(sql: "ALTER TABLE plan_operations ADD COLUMN linked_operation_id TEXT")
         }
     }
     

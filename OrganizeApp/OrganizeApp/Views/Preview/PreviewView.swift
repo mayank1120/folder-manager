@@ -1,16 +1,23 @@
 import SwiftUI
 import OrganizeCore
+import UniformTypeIdentifiers
+import AppKit
 
 struct PreviewView: View {
     @Bindable var viewModel: ProjectViewModel
     @State private var selectedTab: PreviewTab = .moveEligible
     @State private var searchText = ""
+    @State private var showingExportPicker = false
+    @State private var exportResult: ExportResult?
     
     enum PreviewTab: String, CaseIterable {
         case moveEligible = "Move Eligible"
         case needsReview = "Needs Review"
         case excluded = "Excluded"
+        case scanExcluded = "Scan Excluded"
+        case duplicates = "Duplicates"
         case tree = "Tree View"
+        case extensions = "Extensions"
     }
     
     var body: some View {
@@ -49,12 +56,27 @@ struct PreviewView: View {
                     searchText: $searchText,
                     title: "These items are excluded by policy"
                 )
+            case .scanExcluded:
+                ScanExcludedTableView(
+                    items: viewModel.scanExcludedItems,
+                    searchText: $searchText
+                )
+            case .duplicates:
+                DuplicatesTableView(
+                    groups: $viewModel.duplicateGroups,
+                    viewModel: viewModel
+                )
             case .tree:
                 TreeDiffView(
                     operations: filteredOperations,
                     destinationRoot: viewModel.project.destinationRoot?.path ?? ""
                 )
+            case .extensions:
+                ExtensionReportView(rows: viewModel.extensionReport)
             }
+        }
+        .onAppear {
+            loadHistoryOnAppear()
         }
     }
     
@@ -76,6 +98,35 @@ struct PreviewView: View {
                     value: "\(summary.excludedByPolicyCount)",
                     color: .secondary
                 )
+                
+                // Plan History picker
+                if viewModel.planHistory.count > 1 {
+                    Divider()
+                        .frame(height: 30)
+                    
+                    Menu {
+                        ForEach(viewModel.planHistory, id: \.id) { plan in
+                            Button {
+                                Task {
+                                    await viewModel.selectPlan(plan)
+                                }
+                            } label: {
+                                HStack {
+                                    Text(formatPlanDate(plan.createdAt))
+                                    Text("(\(plan.operationCount) ops)")
+                                        .foregroundStyle(.secondary)
+                                    if plan.id == viewModel.project.currentPlanId {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        Label("Plan History", systemImage: "clock.arrow.circlepath")
+                            .font(.caption)
+                    }
+                    .help("Switch between previous plans for this project")
+                }
             }
             
             Spacer()
@@ -104,17 +155,89 @@ struct PreviewView: View {
             } label: {
                 Label("Dry Run", systemImage: "eye")
             }
+            
+            Button {
+                showingExportPicker = true
+            } label: {
+                Label("Export Report", systemImage: "square.and.arrow.up")
+            }
+            .help("Export plan data to CSV files (inventory, proposed moves, needs review, excluded, extensions)")
         }
         .padding()
         .background(.background.secondary)
+        .fileExporter(
+            isPresented: $showingExportPicker,
+            document: ExportFolderDocument(),
+            contentType: .folder,
+            defaultFilename: "OrganizeExport"
+        ) { result in
+            switch result {
+            case .success(let url):
+                Task {
+                    do {
+                        let paths = try await viewModel.exportPlan(to: url)
+                        exportResult = ExportResult(success: true, directory: paths.directory, message: nil)
+                    } catch {
+                        exportResult = ExportResult(success: false, directory: nil, message: error.localizedDescription)
+                    }
+                }
+            case .failure(let error):
+                exportResult = ExportResult(success: false, directory: nil, message: error.localizedDescription)
+            }
+        }
+        .alert("Export Complete", isPresented: .init(
+            get: { exportResult?.success == true },
+            set: { if !$0 { exportResult = nil } }
+        )) {
+            Button("Open Folder") {
+                if let dir = exportResult?.directory {
+                    NSWorkspace.shared.open(dir)
+                }
+                exportResult = nil
+            }
+            Button("OK", role: .cancel) {
+                exportResult = nil
+            }
+        } message: {
+            if let dir = exportResult?.directory {
+                Text("5 CSV files exported to:\n\(dir.path)")
+            }
+        }
+        .alert("Export Failed", isPresented: .init(
+            get: { exportResult?.success == false },
+            set: { if !$0 { exportResult = nil } }
+        )) {
+            Button("OK", role: .cancel) { exportResult = nil }
+        } message: {
+            Text(exportResult?.message ?? "Unknown error")
+        }
     }
     
     private var filteredOperations: [PlanStore.PlanOperationExecutionRow] {
-        guard !searchText.isEmpty else { return viewModel.operations }
+        let base = viewModel.operations.filter {
+            $0.operation.operationType != .applyTags
+        }
+        guard !searchText.isEmpty else { return base }
         let query = searchText.lowercased()
-        return viewModel.operations.filter { row in
+        return base.filter { row in
             row.sourcePathAtScan.lowercased().contains(query) ||
             row.operation.resolvedDestPath.lowercased().contains(query)
+        }
+    }
+    
+    private func formatPlanDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+}
+
+extension PreviewView {
+    /// Load plan history when view appears
+    func loadHistoryOnAppear() {
+        Task {
+            await viewModel.loadPlanHistory()
         }
     }
 }
@@ -357,7 +480,7 @@ struct DispositionBadge: View {
     let disposition: String
     
     var body: some View {
-        Text(disposition)
+        Text(displayText)
             .font(.caption)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
@@ -366,20 +489,29 @@ struct DispositionBadge: View {
             .cornerRadius(4)
     }
     
+    private var displayText: String {
+        switch disposition {
+        case "moveEligible": return "Move Eligible"
+        case "needsReview": return "Needs Review"
+        case "excludedByPolicy": return "Excluded"
+        default: return disposition
+        }
+    }
+    
     private var backgroundColor: Color {
         switch disposition {
-        case "MoveEligible": return .green.opacity(0.2)
-        case "NeedsReview": return .orange.opacity(0.2)
-        case "ExcludedByPolicy": return .gray.opacity(0.2)
+        case "moveEligible": return .green.opacity(0.2)
+        case "needsReview": return .orange.opacity(0.2)
+        case "excludedByPolicy": return .gray.opacity(0.2)
         default: return .gray.opacity(0.2)
         }
     }
     
     private var foregroundColor: Color {
         switch disposition {
-        case "MoveEligible": return .green
-        case "NeedsReview": return .orange
-        case "ExcludedByPolicy": return .secondary
+        case "moveEligible": return .green
+        case "needsReview": return .orange
+        case "excludedByPolicy": return .secondary
         default: return .secondary
         }
     }
@@ -389,7 +521,7 @@ struct ConfidenceBadge: View {
     let confidence: String
     
     var body: some View {
-        Text(confidence)
+        Text(displayText)
             .font(.caption)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
@@ -398,20 +530,26 @@ struct ConfidenceBadge: View {
             .cornerRadius(4)
     }
     
+    private var displayText: String {
+        switch confidence {
+        case "confident": return "Confident"
+        case "notConfident": return "Uncertain"
+        default: return confidence
+        }
+    }
+    
     private var backgroundColor: Color {
-        switch confidence.lowercased() {
-        case "high": return .green.opacity(0.2)
-        case "medium": return .orange.opacity(0.2)
-        case "low": return Color.red.opacity(0.2)
+        switch confidence {
+        case "confident": return .green.opacity(0.2)
+        case "notConfident": return .orange.opacity(0.2)
         default: return Color.gray.opacity(0.2)
         }
     }
     
     private var foregroundColor: Color {
-        switch confidence.lowercased() {
-        case "high": return Color.green
-        case "medium": return Color.orange
-        case "low": return Color.red
+        switch confidence {
+        case "confident": return Color.green
+        case "notConfident": return Color.orange
         default: return .secondary
         }
     }
@@ -488,6 +626,71 @@ struct OperationTypeBadge: View {
             .background(type == .copyItem ? Color.blue.opacity(0.2) : Color.orange.opacity(0.2))
             .foregroundStyle(type == .copyItem ? .blue : .orange)
             .cornerRadius(4)
+    }
+}
+
+// MARK: - Extension Report
+
+struct ExtensionReportView: View {
+    let rows: [PlanStore.ExtensionReportRow]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if rows.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "doc.text.magnifyingglass")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.secondary)
+                    Text("No extension data available")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                HStack {
+                    Text("Extension")
+                        .frame(minWidth: 120, alignment: .leading)
+                    Spacer()
+                    Text("Count")
+                        .frame(width: 80, alignment: .trailing)
+                    Text("Total Size")
+                        .frame(width: 120, alignment: .trailing)
+                }
+                .font(.caption.bold())
+                .foregroundStyle(.secondary)
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                .background(Color.secondary.opacity(0.1))
+
+                Divider()
+
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                            HStack {
+                                Text(row.fileExtension)
+                                    .frame(minWidth: 120, alignment: .leading)
+                                Spacer()
+                                Text("\(row.count)")
+                                    .frame(width: 80, alignment: .trailing)
+                                Text(formatBytes(row.totalBytes))
+                                    .frame(width: 120, alignment: .trailing)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal)
+                            .padding(.vertical, 6)
+                            .background(index % 2 == 0 ? Color.clear : Color.secondary.opacity(0.05))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func formatBytes(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
     }
 }
 
@@ -600,4 +803,391 @@ struct TreeNodeView: View {
 
 #Preview {
     PreviewView(viewModel: ProjectViewModel(project: Project(name: "Test"), appState: AppState()))
+}
+
+// MARK: - Scan Excluded Table View
+
+struct ScanExcludedTableView: View {
+    let items: [ExcludedItem]
+    @Binding var searchText: String
+    
+    var filteredItems: [ExcludedItem] {
+        guard !searchText.isEmpty else { return items }
+        let query = searchText.lowercased()
+        return items.filter { $0.relativePath.lowercased().contains(query) }
+    }
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Search bar
+            SearchBar(searchText: $searchText)
+            
+            if items.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.green)
+                    Text("No items excluded during scan")
+                        .font(.headline)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                // Info banner
+                HStack {
+                    Image(systemName: "info.circle.fill")
+                        .foregroundStyle(.blue)
+                    Text("Items excluded during scan (symlinks, aliases, project folders, hidden items)")
+                        .font(.caption)
+                    Spacer()
+                    Text("\(items.count) item(s)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    
+                    // Export menu
+                    Menu {
+                        Button("Export as CSV...") {
+                            exportItems(format: .csv)
+                        }
+                        Button("Export as JSON...") {
+                            exportItems(format: .json)
+                        }
+                    } label: {
+                        Label("Export", systemImage: "square.and.arrow.up")
+                            .font(.caption)
+                    }
+                    .menuStyle(.borderlessButton)
+                }
+                .padding(8)
+                .background(.blue.opacity(0.1))
+                
+                // Scrollable list of items
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(filteredItems.enumerated()), id: \.offset) { index, item in
+                            ScanExcludedRowView(item: item)
+                                .padding(.horizontal)
+                                .padding(.vertical, 6)
+                                .background(index % 2 == 0 ? Color.clear : Color.secondary.opacity(0.05))
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    enum ExportFormat {
+        case csv, json
+        
+        var fileExtension: String {
+            switch self {
+            case .csv: return "csv"
+            case .json: return "json"
+            }
+        }
+        
+        var fileTypeName: String {
+            switch self {
+            case .csv: return "CSV"
+            case .json: return "JSON"
+            }
+        }
+    }
+    
+    private func exportItems(format: ExportFormat) {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = format == .csv ? [.commaSeparatedText] : [.json]
+        panel.nameFieldStringValue = "scan_excluded.\(format.fileExtension)"
+        panel.title = "Export Scan-Excluded Items"
+        panel.prompt = "Export"
+        
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                let data: Data
+                if format == .csv {
+                    data = ExportHelpers.exportToCSV(items: items).data(using: .utf8) ?? Data()
+                } else {
+                    data = try ExportHelpers.exportToJSON(items: items)
+                }
+                try data.write(to: url)
+            } catch {
+                // Show error - in a real app would use alert
+                print("Export failed: \(error)")
+            }
+        }
+    }
+}
+
+struct ScanExcludedRowView: View {
+    let item: ExcludedItem
+    
+    var body: some View {
+        HStack {
+            // Icon
+            Image(systemName: item.isDirectory ? "folder.fill" : "doc.fill")
+                .foregroundStyle(iconColor)
+            
+            // Path
+            Text(item.relativePath)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            
+            Spacer()
+            
+            // Reason badge
+            Text(reasonLabel)
+                .font(.caption)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
+                .background(reasonColor.opacity(0.2))
+                .foregroundStyle(reasonColor)
+                .cornerRadius(4)
+        }
+    }
+    
+    private var iconColor: Color {
+        switch item.reason {
+        case .symlink, .finderAlias:
+            return .orange
+        case .hiddenItem:
+            return .gray
+        case .appBundle, .photoLibrary, .packageGeneric:
+            return .purple
+        case .projectFolder:
+            return .blue
+        }
+    }
+    
+    private var reasonLabel: String {
+        switch item.reason {
+        case .symlink: return "Symlink"
+        case .finderAlias: return "Alias"
+        case .hiddenItem: return "Hidden"
+        case .appBundle: return "App Bundle"
+        case .photoLibrary: return "Photo Library"
+        case .packageGeneric: return "Package"
+        case .projectFolder: return "Project Folder"
+        }
+    }
+    
+    private var reasonColor: Color {
+        switch item.reason {
+        case .symlink, .finderAlias:
+            return .orange
+        case .hiddenItem:
+            return .gray
+        case .appBundle, .photoLibrary, .packageGeneric:
+            return .purple
+        case .projectFolder:
+            return .blue
+        }
+    }
+}
+
+// MARK: - Duplicates Table View
+
+struct DuplicatesTableView: View {
+    @Binding var groups: [DuplicateGroup]
+    var viewModel: ProjectViewModel
+    @State private var isApplying = false
+    @State private var applyError: String?
+    
+    var totalSavings: Int64 {
+        groups.reduce(0) { $0 + $1.potentialSavingsBytes }
+    }
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            if groups.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.secondary)
+                    Text("No duplicate files found")
+                        .font(.headline)
+                    Text("Enable duplicate detection in settings to scan for duplicates")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                // Summary header
+                HStack {
+                    Image(systemName: "doc.on.doc.fill")
+                        .foregroundStyle(.orange)
+                    Text("\(groups.count) duplicate group(s) found")
+                        .font(.caption)
+                    Spacer()
+                    Text("Potential savings: \(formatBytes(totalSavings))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    
+                    Button {
+                        applySelections()
+                    } label: {
+                        if isApplying {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                        } else {
+                            Label("Apply Selections", systemImage: "checkmark.circle")
+                        }
+                    }
+                    .disabled(isApplying)
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding(8)
+                .background(.orange.opacity(0.1))
+                
+                // Scrollable list of groups
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
+                            DuplicateGroupRowView(
+                                group: Binding(
+                                    get: { groups[index] },
+                                    set: { groups[index] = $0 }
+                                )
+                            )
+                        }
+                    }
+                    .padding()
+                }
+            }
+        }
+    }
+    
+    private func formatBytes(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
+    }
+    
+    private func applySelections() {
+        isApplying = true
+        applyError = nil
+        Task {
+            do {
+                try await viewModel.applyDuplicateSelections()
+            } catch {
+                applyError = error.localizedDescription
+            }
+            isApplying = false
+        }
+    }
+}
+
+struct DuplicateGroupRowView: View {
+    @Binding var group: DuplicateGroup
+    @State private var isExpanded = true
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Group header
+            Button {
+                withAnimation { isExpanded.toggle() }
+            } label: {
+                HStack {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .foregroundStyle(.secondary)
+                    Text("\(group.items.count) copies")
+                        .fontWeight(.medium)
+                    Text("(\(formatBytes(group.items.first?.sizeBytes ?? 0)) each)")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("Hash: \(String(group.id.prefix(8)))...")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(8)
+            .background(.background.secondary)
+            
+            // Expanded items with radio buttons
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(group.items) { item in
+                        HStack {
+                            // Radio button for keeper selection
+                            Image(systemName: group.selectedKeeperId == item.itemId ? "largecircle.fill.circle" : "circle")
+                                .foregroundStyle(group.selectedKeeperId == item.itemId ? .blue : .secondary)
+                                .onTapGesture {
+                                    group.selectedKeeperId = item.itemId
+                                }
+                            
+                            VStack(alignment: .leading) {
+                                Text(item.relativePath)
+                                    .font(.system(.body, design: .monospaced))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Text("Modified: \(item.modifiedTime.formatted())")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            
+                            Spacer()
+                            
+                            if group.selectedKeeperId == item.itemId {
+                                Text("Keep")
+                                    .font(.caption)
+                                    .foregroundStyle(.blue)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(.blue.opacity(0.1))
+                                    .cornerRadius(4)
+                            } else {
+                                Text("Remove")
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(.red.opacity(0.1))
+                                    .cornerRadius(4)
+                            }
+                        }
+                        .padding(8)
+                        .background(group.selectedKeeperId == item.itemId ? Color.blue.opacity(0.05) : Color.clear)
+                    }
+                }
+                .padding(.leading, 24)
+            }
+        }
+        .background(.background)
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.separator, lineWidth: 1)
+        )
+    }
+    
+    private func formatBytes(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
+    }
+}
+
+// MARK: - Export Helper Types
+
+/// Result of a plan export operation
+private struct ExportResult {
+    let success: Bool
+    let directory: URL?
+    let message: String?
+}
+
+/// Document type for folder selection in export
+struct ExportFolderDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.folder] }
+    
+    init() {}
+    
+    init(configuration: ReadConfiguration) throws {
+        // Not used - we're only writing, not reading
+    }
+    
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        // Return empty folder wrapper - ExportManager will populate it
+        return FileWrapper(directoryWithFileWrappers: [:])
+    }
 }

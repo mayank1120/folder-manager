@@ -62,6 +62,107 @@ final class ExecutionEngineTests: XCTestCase {
         XCTAssertEqual(verifyResult.failedCount, 0)
     }
 
+    func testApplyWithTagsCreatesTagOperation() async throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let src = tempDir.appendingPathComponent("src")
+        let dest = tempDir.appendingPathComponent("dest")
+        try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+
+        try writeFile(src.appendingPathComponent("Mayank-note.txt"), contents: "hello")
+
+        var project = Project(
+            name: "Test",
+            sourceRoots: [SourceRoot(path: src.path)],
+            destinationRoot: DestinationRoot(path: dest.path),
+            people: [Person(displayName: "Mayank", keywordTokens: ["Mayank"])]
+        )
+        project.settings.tagsEnabled = true
+        project.settings.tagNames = ["Work"]
+
+        let dbURL = tempDir.appendingPathComponent("organize.db")
+        let dbManager = try DatabaseManager(path: dbURL.path)
+        let inventoryStore = InventoryStore(dbManager: dbManager)
+        let planStore = PlanStore(dbManager: dbManager)
+
+        let scanner = Scanner(inventoryStore: inventoryStore)
+        let scanResult = try await scanner.scan(project: project)
+
+        let planner = Planner(inventoryStore: inventoryStore, planStore: planStore)
+        let summary = try await planner.createPlan(project: project, scanId: scanResult.scan.id)
+        XCTAssertEqual(summary.moveEligibleCount, 1)
+
+        let ops = try await planStore.fetchPlanOperationExecutionRows(planId: summary.plan.id)
+        XCTAssertEqual(ops.count, 2)
+        XCTAssertEqual(ops.first?.operation.operationType, .copyItem)
+        XCTAssertEqual(ops.last?.operation.operationType, .applyTags)
+
+        let applyEngine = ApplyEngine(dbManager: dbManager)
+        let applyResult = try await applyEngine.apply(
+            planId: summary.plan.id,
+            project: project,
+            projectDirectory: tempDir
+        )
+        XCTAssertEqual(applyResult.totalOperations, 2)
+        XCTAssertEqual(applyResult.completedCount, 2)
+        XCTAssertEqual(applyResult.failedCount, 0)
+
+        if let destPath = ops.first(where: { $0.operation.operationType == .copyItem })?.operation.resolvedDestPath {
+            let destURL = URL(fileURLWithPath: destPath)
+            let tags = try destURL.resourceValues(forKeys: [.tagNamesKey]).tagNames ?? []
+            XCTAssertTrue(tags.contains("Work"))
+        } else {
+            XCTFail("Missing destination path for tag verification")
+        }
+    }
+
+    func testApplyMoveCleansEmptyFolders() async throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let src = tempDir.appendingPathComponent("src")
+        let nested = src.appendingPathComponent("nested")
+        let dest = tempDir.appendingPathComponent("dest")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+
+        try writeFile(nested.appendingPathComponent("Mayank-document.pdf"), contents: "hello")
+
+        var project = Project(
+            name: "Test",
+            sourceRoots: [SourceRoot(path: src.path)],
+            destinationRoot: DestinationRoot(path: dest.path),
+            people: [Person(displayName: "Mayank", keywordTokens: ["Mayank"])]
+        )
+        project.settings.executionMode = .move
+        project.settings.cleanupEmptyFolders = true
+
+        let dbURL = tempDir.appendingPathComponent("organize.db")
+        let dbManager = try DatabaseManager(path: dbURL.path)
+        let inventoryStore = InventoryStore(dbManager: dbManager)
+        let planStore = PlanStore(dbManager: dbManager)
+
+        let scanner = Scanner(inventoryStore: inventoryStore)
+        let scanResult = try await scanner.scan(project: project)
+        project.currentScanId = scanResult.scan.id
+
+        let planner = Planner(inventoryStore: inventoryStore, planStore: planStore)
+        let summary = try await planner.createPlan(project: project, scanId: scanResult.scan.id)
+        XCTAssertEqual(summary.moveEligibleCount, 1)
+
+        let applyEngine = ApplyEngine(dbManager: dbManager)
+        let applyResult = try await applyEngine.apply(
+            planId: summary.plan.id,
+            project: project,
+            projectDirectory: tempDir
+        )
+        XCTAssertEqual(applyResult.completedCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: nested.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: src.path))
+    }
+
     func testApplyTimeCollisionResultsInSkipAndVerifyFails() async throws {
         let tempDir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: tempDir) }

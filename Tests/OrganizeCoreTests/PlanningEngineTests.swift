@@ -312,10 +312,12 @@ final class PlannerIntegrationTests: XCTestCase {
         let proposedMovesCSV = try String(contentsOf: paths.proposedMovesCSV, encoding: .utf8)
         let needsReviewCSV = try String(contentsOf: paths.needsReviewCSV, encoding: .utf8)
         let excludedCSV = try String(contentsOf: paths.excludedByPolicyCSV, encoding: .utf8)
+        let extensionReportCSV = try String(contentsOf: paths.extensionReportCSV, encoding: .utf8)
 
         XCTAssertEqual(inventoryCSV.split(separator: "\n").count, 1 + 5) // header + 5 items
         XCTAssertEqual(needsReviewCSV.split(separator: "\n").count, 1 + 1) // mayank_juhi.pdf (autoFileShared default OFF)
         XCTAssertTrue(excludedCSV.contains("PolicyExclude:UnknownType"))
+        XCTAssertTrue(extensionReportCSV.contains("pdf"))
 
         // Proposed moves: 2 Mayank invoices (one collision-resolved) + 1 Juhi image.
         XCTAssertEqual(proposedMovesCSV.split(separator: "\n").count, 1 + 3)
@@ -417,6 +419,157 @@ final class PlannerIntegrationTests: XCTestCase {
         XCTAssertEqual(excluded.count, 1)
         XCTAssertEqual(excluded[0].planItem.reasonCode, PlanReasonCode.policyExcludeUserExtension.rawValue)
     }
+
+    func testLargeFileFilterMovesOnlyAboveThreshold() async throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let root = tempDir.appendingPathComponent("root")
+        let destRoot = tempDir.appendingPathComponent("dest")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destRoot, withIntermediateDirectories: true)
+
+        try writeFile(root.appendingPathComponent("Mayank-small.pdf"), contents: "12345")
+        try writeFile(root.appendingPathComponent("Mayank-big.pdf"), contents: "12345678901234567890")
+
+        var project = Project(
+            name: "Test",
+            sourceRoots: [SourceRoot(path: root.path)],
+            destinationRoot: DestinationRoot(path: destRoot.path),
+            people: [Person(displayName: "Mayank", keywordTokens: ["mayank"])]
+        )
+        project.settings.largeFileFilter = LargeFileFilterSettings(enabled: true, minimumBytes: 10)
+
+        let dbURL = tempDir.appendingPathComponent("organize.db")
+        let dbManager = try DatabaseManager(path: dbURL.path)
+        let inventoryStore = InventoryStore(dbManager: dbManager)
+        let scanner = Scanner(inventoryStore: inventoryStore)
+        let scanResult = try await scanner.scan(project: project)
+
+        let planStore = PlanStore(dbManager: dbManager)
+        let planner = Planner(inventoryStore: inventoryStore, planStore: planStore)
+        let summary = try await planner.createPlan(project: project, scanId: scanResult.scan.id)
+
+        let moveEligible = try await planStore.fetchPlanItemRows(
+            planId: summary.plan.id,
+            disposition: .moveEligible
+        )
+        let needsReview = try await planStore.fetchPlanItemRows(
+            planId: summary.plan.id,
+            disposition: .needsReview
+        )
+
+        XCTAssertEqual(moveEligible.count, 1)
+        XCTAssertEqual(needsReview.count, 1)
+        XCTAssertEqual(needsReview[0].planItem.reasonCode, PlanReasonCode.needsReviewBelowMinSize.rawValue)
+    }
+
+    func testDuplicateDetectionKeepNewest() async throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let root = tempDir.appendingPathComponent("root")
+        let destRoot = tempDir.appendingPathComponent("dest")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destRoot, withIntermediateDirectories: true)
+
+        let olderURL = root.appendingPathComponent("Mayank-dup-old.pdf")
+        let newerURL = root.appendingPathComponent("Mayank-dup-new.pdf")
+        try writeFile(olderURL, contents: "same-content")
+        try writeFile(newerURL, contents: "same-content")
+
+        let oldDate = Date(timeIntervalSince1970: 1_600_000_000)
+        let newDate = Date(timeIntervalSince1970: 1_700_000_000)
+        try setModificationDate(olderURL, date: oldDate)
+        try setModificationDate(newerURL, date: newDate)
+
+        var project = Project(
+            name: "Test",
+            sourceRoots: [SourceRoot(path: root.path)],
+            destinationRoot: DestinationRoot(path: destRoot.path),
+            people: [Person(displayName: "Mayank", keywordTokens: ["mayank"])]
+        )
+        project.settings.duplicateDetection = DuplicateDetectionSettings(enabled: true, handling: .keepNewest)
+
+        let dbURL = tempDir.appendingPathComponent("organize.db")
+        let dbManager = try DatabaseManager(path: dbURL.path)
+        let inventoryStore = InventoryStore(dbManager: dbManager)
+        let scanner = Scanner(inventoryStore: inventoryStore)
+        let scanResult = try await scanner.scan(project: project)
+
+        let planStore = PlanStore(dbManager: dbManager)
+        let planner = Planner(inventoryStore: inventoryStore, planStore: planStore)
+        let summary = try await planner.createPlan(project: project, scanId: scanResult.scan.id)
+
+        let moveEligible = try await planStore.fetchPlanItemRows(
+            planId: summary.plan.id,
+            disposition: .moveEligible
+        )
+        let excluded = try await planStore.fetchPlanItemRows(
+            planId: summary.plan.id,
+            disposition: .excludedByPolicy
+        )
+
+        XCTAssertEqual(moveEligible.count, 1)
+        XCTAssertEqual(excluded.count, 1)
+        XCTAssertEqual(excluded[0].planItem.reasonCode, PlanReasonCode.policyExcludeDuplicate.rawValue)
+    }
+
+    func testPDFDateGroupingYearMonth() async throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let root = tempDir.appendingPathComponent("root")
+        let destRoot = tempDir.appendingPathComponent("dest")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destRoot, withIntermediateDirectories: true)
+
+        let fileURL = root.appendingPathComponent("Mayank-report.pdf")
+        try writeFile(fileURL, contents: "pdf")
+        let fixedDate = Date(timeIntervalSince1970: 1_700_000_000)
+        try setModificationDate(fileURL, date: fixedDate)
+
+        var project = Project(
+            name: "Test",
+            sourceRoots: [SourceRoot(path: root.path)],
+            destinationRoot: DestinationRoot(path: destRoot.path),
+            people: [Person(displayName: "Mayank", keywordTokens: ["mayank"])]
+        )
+        project.settings.pdfDateGrouping = .yearMonth
+
+        let dbURL = tempDir.appendingPathComponent("organize.db")
+        let dbManager = try DatabaseManager(path: dbURL.path)
+        let inventoryStore = InventoryStore(dbManager: dbManager)
+        let scanner = Scanner(inventoryStore: inventoryStore)
+        let scanResult = try await scanner.scan(project: project)
+
+        let planStore = PlanStore(dbManager: dbManager)
+        let planner = Planner(inventoryStore: inventoryStore, planStore: planStore)
+        let summary = try await planner.createPlan(project: project, scanId: scanResult.scan.id)
+
+        let moveEligible = try await planStore.fetchPlanItemRows(
+            planId: summary.plan.id,
+            disposition: .moveEligible
+        )
+        XCTAssertEqual(moveEligible.count, 1)
+
+        let calendar = Calendar(identifier: .gregorian)
+        var utcCalendar = calendar
+        utcCalendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .current
+        let comps = utcCalendar.dateComponents([.year, .month], from: fixedDate)
+        let year = String(comps.year ?? 1970)
+        let month = String(format: "%02d", comps.month ?? 1)
+
+        let expectedPrefix = destRoot
+            .appendingPathComponent("Mayank")
+            .appendingPathComponent("PDF")
+            .appendingPathComponent("Other")
+            .appendingPathComponent(year)
+            .appendingPathComponent(month)
+            .path
+
+        XCTAssertTrue(moveEligible[0].planItem.baseDestPath?.hasPrefix(expectedPrefix) ?? false)
+    }
 }
 
 private func makeTempDir() throws -> URL {
@@ -428,4 +581,8 @@ private func makeTempDir() throws -> URL {
 private func writeFile(_ url: URL, contents: String) throws {
     try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
     try Data(contents.utf8).write(to: url, options: .atomic)
+}
+
+private func setModificationDate(_ url: URL, date: Date) throws {
+    try FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: url.path)
 }

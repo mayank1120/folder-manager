@@ -144,8 +144,8 @@ public struct InventoryStore: Sendable {
                     INSERT OR REPLACE INTO inventory_items 
                     (item_id, scan_id, source_root_id, relative_path, is_package, is_symlink, is_alias,
                      size_bytes, modified_time, created_time, exif_datetime_original, is_cloud_only,
-                     uttype_identifier, extension)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     content_hash, uttype_identifier, extension)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                 arguments: [
                     item.id,
@@ -160,6 +160,7 @@ public struct InventoryStore: Sendable {
                     item.createdTime.map { Int64($0.timeIntervalSince1970) },
                     item.exifDateTimeOriginal.map { Int64($0.timeIntervalSince1970) },
                     item.isCloudOnly ? 1 : 0,
+                    item.contentHash,
                     item.uttypeIdentifier,
                     item.extension
                 ]
@@ -174,8 +175,8 @@ public struct InventoryStore: Sendable {
                     INSERT OR REPLACE INTO inventory_items
                     (item_id, scan_id, source_root_id, relative_path, is_package, is_symlink, is_alias,
                      size_bytes, modified_time, created_time, exif_datetime_original, is_cloud_only,
-                     uttype_identifier, extension)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     content_hash, uttype_identifier, extension)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """
             )
 
@@ -193,6 +194,7 @@ public struct InventoryStore: Sendable {
                     item.createdTime.map { Int64($0.timeIntervalSince1970) },
                     item.exifDateTimeOriginal.map { Int64($0.timeIntervalSince1970) },
                     item.isCloudOnly ? 1 : 0,
+                    item.contentHash,
                     item.uttypeIdentifier,
                     item.extension
                 ])
@@ -233,10 +235,79 @@ public struct InventoryStore: Sendable {
                     createdTime: createdTime,
                     exifDateTimeOriginal: exifDateTime,
                     isCloudOnly: (row["is_cloud_only"] as Int? ?? 0) == 1,
+                    contentHash: row["content_hash"],
                     uttypeIdentifier: row["uttype_identifier"],
                     extension: row["extension"]
                 )
             }
+        }
+    }
+    
+    /// Optimized fetch that combines inventory items with their source root paths in a single query
+    /// Returns (items, sourceRootPathById map) to avoid separate fetchScanSourceRoots call
+    public func fetchInventoryItemsWithSourceRoots(
+        for scanId: EntityID
+    ) async throws -> (items: [InventoryItem], sourceRootPaths: [EntityID: String]) {
+        try await dbManager.read { db in
+            // Single query with JOIN to get inventory items + source root paths
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT 
+                        i.*,
+                        s.path_at_scan
+                    FROM inventory_items i
+                    LEFT JOIN scan_source_roots s 
+                        ON i.scan_id = s.scan_id AND i.source_root_id = s.source_root_id
+                    WHERE i.scan_id = ?
+                    ORDER BY i.source_root_id, i.relative_path
+                    """,
+                arguments: [scanId.uuidString]
+            )
+            
+            var items: [InventoryItem] = []
+            var sourceRootPaths: [EntityID: String] = [:]
+            items.reserveCapacity(rows.count)
+            
+            for row in rows {
+                guard let itemId = row["item_id"] as String?,
+                      let sourceRootIdStr = row["source_root_id"] as String?,
+                      let sourceRootId = UUID(uuidString: sourceRootIdStr),
+                      let relativePath = row["relative_path"] as String?,
+                      let sizeBytes = row["size_bytes"] as Int64?,
+                      let modifiedTimeEpoch = row["modified_time"] as Int64? else {
+                    continue
+                }
+                
+                // Cache source root path
+                if let pathAtScan = row["path_at_scan"] as String? {
+                    sourceRootPaths[sourceRootId] = pathAtScan
+                }
+                
+                let createdTime: Date? = (row["created_time"] as Int64?).map { Date(timeIntervalSince1970: TimeInterval($0)) }
+                let exifDateTime: Date? = (row["exif_datetime_original"] as Int64?).map { Date(timeIntervalSince1970: TimeInterval($0)) }
+                
+                let item = InventoryItem(
+                    id: itemId,
+                    scanId: scanId,
+                    sourceRootId: sourceRootId,
+                    relativePath: relativePath,
+                    isPackage: (row["is_package"] as Int? ?? 0) == 1,
+                    isSymlink: (row["is_symlink"] as Int? ?? 0) == 1,
+                    isAlias: (row["is_alias"] as Int? ?? 0) == 1,
+                    sizeBytes: sizeBytes,
+                    modifiedTime: Date(timeIntervalSince1970: TimeInterval(modifiedTimeEpoch)),
+                    createdTime: createdTime,
+                    exifDateTimeOriginal: exifDateTime,
+                    isCloudOnly: (row["is_cloud_only"] as Int? ?? 0) == 1,
+                    contentHash: row["content_hash"],
+                    uttypeIdentifier: row["uttype_identifier"],
+                    extension: row["extension"]
+                )
+                items.append(item)
+            }
+            
+            return (items, sourceRootPaths)
         }
     }
     
@@ -276,6 +347,7 @@ public struct InventoryStore: Sendable {
                 createdTime: createdTime,
                 exifDateTimeOriginal: exifDateTime,
                 isCloudOnly: (row["is_cloud_only"] as Int? ?? 0) == 1,
+                contentHash: row["content_hash"],
                 uttypeIdentifier: row["uttype_identifier"],
                 extension: row["extension"]
             )
@@ -382,6 +454,76 @@ public struct InventoryStore: Sendable {
                 sql: "SELECT COUNT(*) FROM scan_excluded_items WHERE scan_id = ?",
                 arguments: [scanId.uuidString]
             ) ?? 0
+        }
+    }
+    
+    // MARK: - Duplicate Detection
+    
+    /// Fetch groups of duplicate files (same content_hash) for a scan
+    public func fetchDuplicateGroups(for scanId: EntityID) async throws -> [DuplicateGroup] {
+        try await dbManager.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT
+                      i.content_hash,
+                      i.item_id,
+                      i.relative_path,
+                      i.source_root_id,
+                      i.size_bytes,
+                      i.modified_time
+                    FROM inventory_items i
+                    JOIN (
+                      SELECT content_hash
+                      FROM inventory_items
+                      WHERE scan_id = ? AND content_hash IS NOT NULL AND content_hash != ''
+                      GROUP BY content_hash
+                      HAVING COUNT(*) > 1
+                    ) d ON d.content_hash = i.content_hash
+                    WHERE i.scan_id = ? AND i.content_hash IS NOT NULL AND i.content_hash != ''
+                    ORDER BY i.content_hash, i.modified_time DESC, i.source_root_id, i.relative_path
+                    """,
+                arguments: [scanId.uuidString, scanId.uuidString]
+            )
+
+            var groups: [DuplicateGroup] = []
+            var currentHash: String?
+            var currentItems: [DuplicateItem] = []
+
+            func flush() {
+                guard let hash = currentHash, currentItems.count > 1 else { return }
+                groups.append(DuplicateGroup(id: hash, items: currentItems, selectedKeeperId: currentItems.first?.itemId))
+            }
+
+            for row in rows {
+                guard let contentHash = row["content_hash"] as String?,
+                      let itemId = row["item_id"] as String?,
+                      let relativePath = row["relative_path"] as String?,
+                      let sourceRootIdStr = row["source_root_id"] as String?,
+                      let sourceRootId = UUID(uuidString: sourceRootIdStr),
+                      let sizeBytes = row["size_bytes"] as Int64?,
+                      let modifiedTime = row["modified_time"] as Int64? else {
+                    continue
+                }
+
+                if currentHash != contentHash {
+                    flush()
+                    currentHash = contentHash
+                    currentItems = []
+                    currentItems.reserveCapacity(4)
+                }
+
+                currentItems.append(DuplicateItem(
+                    itemId: itemId,
+                    relativePath: relativePath,
+                    sourceRootId: sourceRootId,
+                    sizeBytes: sizeBytes,
+                    modifiedTime: Date(timeIntervalSince1970: TimeInterval(modifiedTime))
+                ))
+            }
+
+            flush()
+            return groups
         }
     }
 }

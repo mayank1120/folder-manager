@@ -60,6 +60,12 @@ final class ProjectTests: XCTestCase {
         XCTAssertFalse(settings.ownerMatching.enableDigitSplit)
         XCTAssertTrue(settings.extensionRules.isEmpty)
         XCTAssertEqual(settings.extensionExclusions.excludeMode, .excludeOnlyThese)
+        XCTAssertFalse(settings.duplicateDetection.enabled)
+        XCTAssertEqual(settings.duplicateDetection.handling, .keepNewest)
+        XCTAssertFalse(settings.largeFileFilter.enabled)
+        XCTAssertEqual(settings.largeFileFilter.minimumBytes, 100 * 1024 * 1024)
+        XCTAssertEqual(settings.pdfDateGrouping, .year)
+        XCTAssertFalse(settings.cleanupEmptyFolders)
     }
     
     func testSourceRootSlugGeneration() {
